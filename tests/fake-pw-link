@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+import json, os, sys
+S = os.environ["FAKE_PW_STATE"]
+st = json.load(open(S))
+a = sys.argv[1:]
+def save(): json.dump(st, open(S, "w"))
+if a == ["-o"]:
+    print("\n".join(st["out"])); sys.exit(0)
+if a == ["-i"]:
+    print("\n".join(st["in"])); sys.exit(0)
+if a == ["-l"]:
+    byport = {}
+    for s, d in st["links"]:
+        byport.setdefault(s, []).append(("->", d)); byport.setdefault(d, []).append(("<-", s))
+    for p, ls in byport.items():
+        print(p)
+        for k, o in ls: print(f"  |{k} {o}")
+    sys.exit(0)
+if a[0] == "-d":
+    l = [a[1], a[2]]
+    if l in st["links"]: st["links"].remove(l); save(); sys.exit(0)
+    print("no such link", file=sys.stderr); sys.exit(1)
+l = [a[0], a[1]]
+if l in st["links"]: print("File exists", file=sys.stderr); sys.exit(1)
+if a[0] not in st["out"] or a[1] not in st["in"]: print("port missing", file=sys.stderr); sys.exit(1)
+st["links"].append(l); save()

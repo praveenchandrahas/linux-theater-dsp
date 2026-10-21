@@ -1,0 +1,14 @@
+# EXAMPLE ONLY. The real unit on the machine was not captured when this repo was written.
+# TODO(owner): replace with the output of:  systemctl --user cat camilladsp.service
+# What is known: the process runs as  /usr/local/bin/camilladsp /home/<user>/.config/camilladsp/config.yml
+[Unit]
+Description=CamillaDSP
+After=pipewire.service
+
+[Service]
+ExecStart=/usr/local/bin/camilladsp %h/.config/camilladsp/config.yml
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

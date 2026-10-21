@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""theater-route / eq : keep mpv routed through CamillaDSP automatically, with an on/off switch.
+
+  theater-route daemon      run forever (this is what the systemd user service does)
+  eq status                 show what is happening right now
+  eq on | off | toggle      EQ on  = mpv -> CamillaDSP -> USB interface (bass EQ, delays, trims)
+                            EQ off = mpv -> USB interface directly (nothing from CamillaDSP at all)
+
+The daemon looks at PipeWire twice a second. Whenever mpv (or mpv-atmos) shows up it links its channels
+to CamillaDSP and removes the direct route, "make before break", so there is never a silent gap. If
+CamillaDSP is missing or half-ready it leaves/puts mpv on the direct route instead. It also keeps
+CamillaDSP's outputs linked to the USB interface (those links are lost every time CamillaDSP restarts).
+
+State: ~/.local/state/theater/eq  (contains "on" or "off"; no file = on).
+"""
+import os, shutil, subprocess, sys, time
+
+USB = os.environ.get("THEATER_USB", "alsa_output.usb-0d8c_USB_Sound_Device-00.analog-surround-71")
+PORTS = ["FL", "FR", "RL", "RR", "FC", "LFE", "SL", "SR"]          # hardware order = CamillaDSP channel 1..8
+PW_LINK = os.environ.get("THEATER_PW_LINK", "pw-link")
+STATE_DIR = os.path.expanduser(os.environ.get("THEATER_STATE_DIR", "~/.local/state/theater"))
+STATE = os.path.join(STATE_DIR, "eq")
+CONFIG = os.path.expanduser(os.environ.get("THEATER_CAMILLA_CONFIG", "~/.config/camilladsp/config.yml"))
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+# ---------------------------------------------------------------- PipeWire access
+def pw(*args):
+    try:
+        return subprocess.run([PW_LINK, *args], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def port_set(flag):
+    r = pw(flag)
+    if r is None or r.returncode != 0:
+        return None                       # PipeWire not reachable right now
+    return {x.strip() for x in r.stdout.splitlines() if x.strip()}
+
+
+def read_links():
+    r = pw("-l")
+    out, port = set(), None
+    if r is None:
+        return out
+    for line in r.stdout.splitlines():
+        if line and not line.startswith(" "):
+            port = line.rstrip()
+        elif "|->" in line and port is not None:
+            out.add((port, line.split("|->", 1)[1].strip()))
+    return out
+
+
+class Graph:
+    def __init__(self):
+        self.links = read_links()
+
+    def has(self, a, b):
+        return (a, b) in self.links
+
+    def add(self, a, b):
+        if not self.has(a, b):
+            pw(a, b)
+            self.links = read_links()
+
+    def delete(self, a, b):
+        if self.has(a, b):
+            pw("-d", a, b)
+            self.links = read_links()
+
+
+# ---------------------------------------------------------------- the routing decision
+def cam_out(i):
+    return f"camilladsp-playback:output_{i + 1}"
+
+
+def cam_in(i):
+    return f"camilladsp-capture:input_{i + 1}"
+
+
+def apply(mode, out=None):
+    """Bring the graph to the wanted state. Safe to call at any time, as often as you like."""
+    out = out if out is not None else port_set("-o")
+    inn = port_set("-i")
+    if out is None or inn is None:
+        return None
+    mpv = [p for p in PORTS if f"mpv:output_{p}" in out]
+    cam_out_up = all(cam_out(i) in out for i in range(8))
+    cam_in_up = all(cam_in(i) in inn for i in range(8))
+    usb_up = all(f"{USB}:playback_{p}" in inn for p in PORTS)
+
+    g = Graph()
+    # 1. CamillaDSP -> USB, always (these links do not survive a CamillaDSP restart)
+    if cam_out_up and usb_up:
+        for i, p in enumerate(PORTS):
+            g.add(cam_out(i), f"{USB}:playback_{p}")
+    if not mpv:
+        return "idle"
+
+    def direct(p):
+        return f"mpv:output_{p}", f"{USB}:playback_{p}"
+
+    def via(p):
+        return f"mpv:output_{p}", cam_in(PORTS.index(p))
+
+    dsp_ready = (cam_out_up and cam_in_up and usb_up
+                 and all(g.has(cam_out(i), f"{USB}:playback_{p}") for i, p in enumerate(PORTS)))
+    use_dsp = (mode == "on") and dsp_ready
+
+    if use_dsp:
+        added = [via(p) for p in mpv if not g.has(*via(p))]
+        for a, b in added:
+            g.add(a, b)
+        if all(g.has(*via(p)) for p in mpv):
+            for p in mpv:
+                g.delete(*direct(p))                       # only now drop the direct route
+            return f"mpv {len(mpv)}ch via CamillaDSP"
+        for a, b in added:                                  # could not build it all: roll back
+            g.delete(a, b)
+        use_dsp = False
+
+    if usb_up:
+        for p in mpv:
+            g.add(*direct(p))
+        if all(g.has(*direct(p)) for p in mpv):
+            for p in mpv:
+                g.delete(*via(p))
+            why = "EQ off" if mode == "off" else "CamillaDSP not ready"
+            return f"mpv {len(mpv)}ch direct ({why})"
+    return f"mpv {len(mpv)}ch: USB interface not found"
+
+
+# ---------------------------------------------------------------- state
+def read_mode():
+    try:
+        with open(STATE) as f:
+            return "off" if f.read().strip() == "off" else "on"
+    except OSError:
+        return "on"
+
+
+def write_mode(mode):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(mode + "\n")
+    os.replace(tmp, STATE)
+
+
+def notify(title, body=""):
+    if shutil.which("notify-send"):
+        try:
+            subprocess.run(["notify-send", "-a", "Home theatre", "-t", "1500", title, body],
+                           timeout=2, capture_output=True)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+# ---------------------------------------------------------------- daemon
+def daemon():
+    last_sig, last_msg, tick = None, None, 0
+    log("theater-route started")
+    while True:
+        mode = read_mode()
+        out = port_set("-o")
+        if out is not None:
+            sig = (mode, frozenset(p for p in out if p.startswith(("mpv:", "camilladsp-"))))
+            # act at once when something relevant changed; re-check everything every 2 s anyway
+            if sig != last_sig or tick % 4 == 0:
+                try:
+                    msg = apply(mode, out)
+                except Exception as e:                      # never let the daemon die over one bad tick
+                    msg = f"error: {e}"
+                last_sig = sig
+                if msg != last_msg:
+                    log(f"[EQ {mode}] {msg}")
+                    last_msg = msg
+            tick += 1
+        time.sleep(0.5)
+
+
+# ---------------------------------------------------------------- user commands
+def service_state(name):
+    try:
+        r = subprocess.run(["systemctl", "--user", "is-active", name], capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() or "unknown"
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+
+
+def config_summary():
+    try:
+        text = open(CONFIG).read()
+    except OSError:
+        return "config not found"
+    parts = []
+    for tag, name in (("d3_1", "drone3"), ("d2_1", "drone2"), ("d1_1", "drone1")):
+        if f"{tag}:" in text:
+            parts.append(f"bass set {name}")
+            break
+    parts.append("bed alignment: " + ("yes" if "al_delay_" in text else "no"))
+    return ", ".join(parts)
+
+
+def status():
+    mode = read_mode()
+    print(f"EQ switch:     {mode.upper()}   (file {STATE})")
+    print(f"Router daemon: {service_state('theater-router.service')}")
+    print(f"CamillaDSP:    {service_state('camilladsp.service')}   [{config_summary()}]")
+    out, inn = port_set("-o"), port_set("-i")
+    if out is None or inn is None:
+        print("PipeWire:      not reachable")
+        return
+    g = Graph()
+    mpv = [p for p in PORTS if f"mpv:output_{p}" in out]
+    if not mpv:
+        print("mpv:           not playing")
+        return
+    d = sum(g.has(f"mpv:output_{p}", f"{USB}:playback_{p}") for p in mpv)
+    v = sum(g.has(f"mpv:output_{p}", cam_in(PORTS.index(p))) for p in mpv)
+    o = sum(g.has(cam_out(i), f"{USB}:playback_{p}") for i, p in enumerate(PORTS))
+    print(f"mpv:           {len(mpv)} channels ({' '.join(mpv)})")
+    print(f"Route:         via CamillaDSP {v}/{len(mpv)}   direct {d}/{len(mpv)}   CamillaDSP -> USB {o}/8")
+    if v == len(mpv) and d == 0:
+        print("=> audio goes through CamillaDSP (EQ active)")
+    elif d == len(mpv) and v == 0:
+        print("=> audio goes direct to the USB interface (no EQ)")
+    else:
+        print("=> mixed or unfinished routing (the daemon will normally fix this within a second)")
+
+
+def set_mode(mode):
+    write_mode(mode)
+    msg = apply(mode)                         # immediate effect; the daemon would do the same within 0.5 s
+    if mode == "on":
+        notify("EQ on", "bass EQ + speaker alignment active")
+        print("EQ on.  mpv plays through CamillaDSP." + ("" if not msg or msg == "idle" else f"  ({msg})"))
+    else:
+        notify("EQ off", "mpv goes straight to the speakers")
+        print("EQ off. mpv plays directly (no bass EQ, no delay or level trims)." + ("" if not msg or msg == "idle" else f"  ({msg})"))
+
+
+def main():
+    prog = os.path.basename(sys.argv[0])
+    args = sys.argv[1:]
+    if prog == "eq":
+        cmd = args[0] if args else "status"
+    else:
+        cmd = args[0] if args else "daemon"
+    if cmd == "daemon":
+        daemon()
+    elif cmd in ("on", "off"):
+        set_mode(cmd)
+    elif cmd == "toggle":
+        set_mode("off" if read_mode() == "on" else "on")
+    elif cmd == "status":
+        status()
+    else:
+        print(__doc__)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
