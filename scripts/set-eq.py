@@ -21,7 +21,8 @@ Usage: ./set-eq.py [<scale> <max_freq_hz>] [--set=NAME] [--skip=a,b] [--dry]
 
   --heights    high-pass the two height speakers (LR4) and send what they lose, low-passed and summed, to the
                LFE channel (the sub). Add --heights-hp=120 (Hz, default 120), --heights-lfe=0 (dB, default 0: gain of
-               the height bass as it joins the LFE), --heights-tone (tone-match the heights to the bed, see HEIGHT_TONE).
+               the height bass as it joins the LFE), --heights-delay=0 (ms, extra delay of that bass path),
+               --heights-invert (flip its polarity), --heights-tone (tone-match the heights to the bed, see HEIGHT_TONE).
 
 Examples:
   ./set-eq.py --set=hump14             deliberate hump, middle size
@@ -219,12 +220,14 @@ HEIGHT_CH = (2, 3)
 HEIGHT_BUS = 8       # internal 9th channel: the sum of the two heights, low-passed, then added to the LFE
 
 
-def height_blocks(hp, lfe_gain, tone):
+def height_blocks(hp, lfe_gain, tone, delay=0.0, invert=False):
     """Returns (filters_yaml, mixers_yaml, steps_yaml) for the heights-to-LFE bass management."""
     f = ""
     for ch in HEIGHT_CH:
         f += f"  h_hp_{ch}:\n    type: BiquadCombo\n    parameters: {{type: LinkwitzRileyHighpass, freq: {hp}, order: 4}}\n"
     f += f"  h_lp_bus:\n    type: BiquadCombo\n    parameters: {{type: LinkwitzRileyLowpass, freq: {hp}, order: 4}}\n"
+    if delay > 0:
+        f += f"  h_dly_bus:\n    type: Delay\n    parameters: {{delay: {delay}, unit: ms, subsample: false}}\n"
     if tone:
         for n, p in HEIGHT_TONE:
             f += f"  {n}:\n    type: Biquad\n    parameters: {{{', '.join(f'{k}: {v}' for k, v in p.items())}}}\n"
@@ -235,11 +238,11 @@ def height_blocks(hp, lfe_gain, tone):
     m += "  heights_out:\n    channels: {in: 9, out: 8}\n    mapping:\n"
     for d in range(8):
         if d == 5:
-            m += f"      - dest: 5\n        sources:\n          - {{channel: 5, gain: 0.0}}\n          - {{channel: {HEIGHT_BUS}, gain: {lfe_gain}}}\n"
+            m += f"      - dest: 5\n        sources:\n          - {{channel: 5, gain: 0.0}}\n          - {{channel: {HEIGHT_BUS}, gain: {lfe_gain}{', inverted: true' if invert else ''}}}\n"
         else:
             m += f"      - dest: {d}\n        sources:\n          - {{channel: {d}, gain: 0.0}}\n"
     st = "  - type: Mixer\n    name: heights_in\n"
-    st += f"  - type: Filter\n    channels: [{HEIGHT_BUS}]\n    names:\n      - h_lp_bus\n"
+    st += f"  - type: Filter\n    channels: [{HEIGHT_BUS}]\n    names:\n      - h_lp_bus\n" + ("      - h_dly_bus\n" if delay > 0 else "")
     for ch in HEIGHT_CH:
         names = [f"h_hp_{ch}"] + ([n for n, _ in HEIGHT_TONE] if tone else [])
         st += f"  - type: Filter\n    channels: [{ch}]\n    names:\n" + "".join(f"      - {n}\n" for n in names)
@@ -302,6 +305,9 @@ def main():
                 heights["hp"] = float(x.split("=", 1)[1])
             elif x.startswith("--heights-lfe="):
                 heights["lfe_gain"] = float(x.split("=", 1)[1])
+            elif x.startswith("--heights-delay="):
+                heights["delay"] = float(x.split("=", 1)[1])
+        heights["invert"] = "--heights-invert" in sys.argv
     align = "bed" if "--align=bed" in sys.argv else ("all" if "--align" in sys.argv else None)
     setname, skip = "rew", set()
     for x in sys.argv[1:]:
@@ -341,7 +347,7 @@ def main():
             print(f"  channel {ch} {label:<10} delay {delay:5.2f} ms   trim {trim:+.1f} dB")
     if heights:
         print(f"Heights: LR4 high-pass at {heights['hp']:g} Hz on RL/RR height; their sum, LR4 low-passed at the same "
-              f"frequency, joins the LFE at {heights['lfe_gain']:+.1f} dB" + ("; tone-match: " + ", ".join(
+              f"frequency, joins the LFE at {heights['lfe_gain']:+.1f} dB" + (f", delayed {heights['delay']:g} ms" if heights.get("delay") else "") + (", polarity inverted" if heights.get("invert") else "") + ("; tone-match: " + ", ".join(
                   f"{p['type']} {p['freq']} Hz {p['gain']:+.1f} dB" for _, p in HEIGHT_TONE) if heights["tone"] else ""))
     if dry:
         return
