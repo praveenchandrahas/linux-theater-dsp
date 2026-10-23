@@ -3,6 +3,7 @@
 
   theater-route daemon      run forever (this is what the systemd user service does)
   eq status                 show what is happening right now
+  eq ensure                 start camilladsp.service and theater-router.service if they are not running (mpv-atmos calls this)
   eq on | off | toggle      EQ on  = mpv -> CamillaDSP -> USB interface (bass EQ, delays, trims)
                             EQ off = mpv -> USB interface directly (nothing from CamillaDSP at all)
 
@@ -203,6 +204,10 @@ def config_summary():
             parts.append(f"bass set {name}")
             break
     parts.append("bed alignment: " + ("yes" if "al_delay_" in text else "no"))
+    if "heights_in" in text:
+        parts.append("heights: bass to sub" + (" + tone-match" if "ht_trim" in text else ""))
+    else:
+        parts.append("heights: untouched")
     return ", ".join(parts)
 
 
@@ -233,6 +238,21 @@ def status():
         print("=> mixed or unfinished routing (the daemon will normally fix this within a second)")
 
 
+def ensure():
+    """Start the two services if they are down. Silent when everything is already running."""
+    started = []
+    for unit in ("camilladsp.service", "theater-router.service"):
+        if service_state(unit) != "active":
+            try:
+                subprocess.run(["systemctl", "--user", "start", unit], capture_output=True, timeout=15)
+                started.append(unit)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    if started:
+        print("started: " + ", ".join(started), file=sys.stderr)
+        time.sleep(1.0)                       # let CamillaDSP create its ports; the router links mpv as soon as they exist
+
+
 def set_mode(mode):
     write_mode(mode)
     msg = apply(mode)                         # immediate effect; the daemon would do the same within 0.5 s
@@ -259,6 +279,8 @@ def main():
         set_mode("off" if read_mode() == "on" else "on")
     elif cmd == "status":
         status()
+    elif cmd == "ensure":
+        ensure()
     else:
         print(__doc__)
         sys.exit(1)

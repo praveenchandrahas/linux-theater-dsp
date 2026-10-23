@@ -24,7 +24,11 @@ Usage: ./set-eq.py [<scale> <max_freq_hz>] [--set=NAME] [--skip=a,b] [--dry]
                the height bass as it joins the LFE), --heights-delay=0 (ms, extra delay of that bass path),
                --heights-invert (flip its polarity), --heights-tone (tone-match the heights to the bed, see HEIGHT_TONE).
 
+  (no arguments, or --default)
+               the standing profile = --set=drone2 --align --heights --heights-tone. This is what ./make-default.sh applies.
+
 Examples:
+  ./set-eq.py                          the standing profile (same as: --set=drone2 --align --heights --heights-tone)
   ./set-eq.py --set=hump14             deliberate hump, middle size
   ./set-eq.py --set=thump14            same, with extra weight at 63 Hz
   ./set-eq.py --set=thump20            hump20 with the 63 Hz thump lifted back (also punch20, thump20x)
@@ -298,7 +302,13 @@ def build_config(chosen, align=None, invert=(), heights=None):
     return text
 
 
+DEFAULT_ARGS = ["--set=drone2", "--align", "--heights", "--heights-tone"]
+
+
 def main():
+    # No arguments (or --default) = the standing profile: drone2 bass set, measured alignment, heights bass-managed and tone-matched.
+    if all(a in ("--dry", "--default") for a in sys.argv[1:]):
+        sys.argv = [sys.argv[0]] + DEFAULT_ARGS + [a for a in sys.argv[1:] if a != "--default"]
     args = [x for x in sys.argv[1:] if not x.startswith("--")]
     dry = "--dry" in sys.argv
     invert = []

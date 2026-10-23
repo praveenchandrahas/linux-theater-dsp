@@ -46,5 +46,17 @@ check("--align: heights get delays too", {2, 3} <= {int(k.split("_")[-1]) for k,
 inv = yaml.safe_load(S.build_config(drone2, invert=["FC"]))
 check("--invert=FC: one inverted gain on channel 4", inv["filters"]["inv_4"]["parameters"]["inverted"] is True)
 check("no flags: output identical to a plain EQ config (no align filters)", not any(k.startswith("al_") for k in plain["filters"]))
+
+# standing profile: no-argument default and the heights bass management
+h = yaml.safe_load(S.build_config(drone2, align="all", heights={"hp": 140, "lfe_gain": 0.0, "tone": True}))
+check("heights profile: every pipeline filter/mixer reference is defined",
+      all(set(st["names"]) <= set(h["filters"]) for st in h["pipeline"] if st["type"] == "Filter")
+      and all(st["name"] in h["mixers"] for st in h["pipeline"] if st["type"] == "Mixer"))
+check("heights profile: mixer in (8->9) comes first, mixer out (9->8) before the bass EQ",
+      [st["type"] for st in h["pipeline"][:5]] == ["Mixer", "Filter", "Filter", "Filter", "Mixer"]
+      and h["mixers"]["heights_in"]["channels"] == {"in": 8, "out": 9} and h["mixers"]["heights_out"]["channels"] == {"in": 9, "out": 8})
+check("heights profile: height bass joins LFE (dest 5) from the bus channel 8",
+      any(src["channel"] == 8 for m in h["mixers"]["heights_out"]["mapping"] if m["dest"] == 5 for src in m["sources"]))
+check("DEFAULT_ARGS is the standing profile", S.DEFAULT_ARGS == ["--set=drone2", "--align", "--heights", "--heights-tone"])
 print("\nALL PASS" if ok else "\nSOME FAILED")
 sys.exit(0 if ok else 1)
