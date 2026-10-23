@@ -24,6 +24,11 @@ Usage: ./set-eq.py [<scale> <max_freq_hz>] [--set=NAME] [--skip=a,b] [--dry]
                the height bass as it joins the LFE), --heights-delay=0 (ms, extra delay of that bass path),
                --heights-invert (flip its polarity), --heights-tone (tone-match the heights to the bed, see HEIGHT_TONE).
 
+  --rattle[=X] experimental, off by default: two broad cuts where the sub was heard to buzz (about 38 Hz and 58 Hz, -3 dB x X each,
+               X defaults to 1.0) plus a gentle 28 Hz high-pass (2nd order) to keep sub-bass off the cone. Lowers cone excursion in those bands,
+               which is the only EQ lever on a mechanical buzz. It costs a little of the 56-63 Hz "thump" the standing profile deliberately keeps.
+               Undo by leaving the flag off (the standing profile has no rattle filters).
+
   (no arguments, or --default)
                the standing profile = --set=drone2 --align --heights --heights-tone. This is what ./make-default.sh applies.
 
@@ -265,7 +270,11 @@ def height_blocks(hp, lfe_gain, tone, delay=0.0, invert=False):
 INVERT_CH = {"FL": 0, "FR": 1, "RL": 2, "RR": 3, "FC": 4, "LFE": 5, "SL": 6, "SR": 7}
 
 
-def build_config(chosen, align=None, invert=(), heights=None):
+RATTLE = [("rt_38", 38.0, -3.0, 2.5), ("rt_58", 58.0, -3.0, 3.0)]     # name, Hz, dB, Q (peaking cuts, scaled by --rattle=X)
+RATTLE_HP_HZ = 28.0                                                    # 2nd-order Butterworth high-pass on the Z906 inputs
+
+
+def build_config(chosen, align=None, invert=(), heights=None, rattle_hp=False):
     """chosen: list of (name, freq, gain, q). Returns the CamillaDSP YAML text."""
     text = HEAD + "\nfilters:\n"
     for n, f, g, q in chosen:
@@ -276,9 +285,12 @@ def build_config(chosen, align=None, invert=(), heights=None):
         hf, hmix, hst = height_blocks(**heights)
         text += hf
         steps += hst
-    if chosen:
+    if rattle_hp:
+        text += f"  rt_hp:\n    type: Biquad\n    parameters: {{type: Highpass, freq: {RATTLE_HP_HZ}, q: 0.707}}\n"
+    names_all = [n for n, *_ in chosen] + (["rt_hp"] if rattle_hp else [])
+    if names_all:
         steps += f"  - type: Filter\n    channels: {CHANNELS}\n    names:\n"
-        steps += "".join(f"      - {n}\n" for n, *_ in chosen)
+        steps += "".join(f"      - {n}\n" for n in names_all)
     for nm in invert:
         ch = INVERT_CH[nm]
         text += f"  inv_{ch}:\n    type: Gain\n    parameters: {{gain: 0.0, inverted: true, mute: false}}\n"
@@ -307,7 +319,7 @@ DEFAULT_ARGS = ["--set=drone2", "--align", "--heights", "--heights-tone"]
 
 def main():
     # No arguments (or --default) = the standing profile: drone2 bass set, measured alignment, heights bass-managed and tone-matched.
-    if all(a in ("--dry", "--default") for a in sys.argv[1:]):
+    if all(a in ("--dry", "--default") or a.startswith("--rattle") for a in sys.argv[1:]):
         sys.argv = [sys.argv[0]] + DEFAULT_ARGS + [a for a in sys.argv[1:] if a != "--default"]
     args = [x for x in sys.argv[1:] if not x.startswith("--")]
     dry = "--dry" in sys.argv
@@ -349,12 +361,21 @@ def main():
         print("Unknown filter name(s) in --skip for this set:", ", ".join(sorted(unknown)))
         sys.exit(1)
     chosen = [(n, f, round(g * scale, 2), q) for n, f, g, q in filters if f <= max_f and n not in skip]
+    rattle = None
+    for x in sys.argv[1:]:
+        if x == "--rattle":
+            rattle = 1.0
+        elif x.startswith("--rattle="):
+            rattle = float(x.split("=", 1)[1])
+    if rattle is not None:
+        chosen = chosen + [(n, f, round(g * rattle, 2), q) for n, f, g, q in RATTLE]
+        print(f"Rattle trial: cuts at 38 Hz and 58 Hz ({-3 * rattle:+.1f} dB each) and a {RATTLE_HP_HZ:g} Hz high-pass")
     print(f"Filter set: {setname}, scale {scale}, max {max_f:g} Hz, {len(chosen)} filters")
     if skip:
         print("Leaving these filters out:", ", ".join(sorted(skip)))
 
     print("Net filter response (dB, filtered channels):")
-    for f in (40, 48, 52, 56, 60, 64, 68, 72, 85, 100, 125, 155, 200, 250, 1000):
+    for f in (30, 38, 40, 48, 52, 56, 58, 60, 64, 68, 72, 85, 100, 125, 155, 200, 250, 1000):
         print(f"  {f:>5} Hz: {sum(peaking_db(f, f0, g, q) for _, f0, g, q in chosen):6.1f}")
     if align:
         print(f"Time alignment and trims (--align{'=bed: heights untouched' if align == 'bed' else ''}):")
@@ -376,7 +397,7 @@ def main():
         sys.exit(1)
     if invert:
         print("Polarity inverted on:", ", ".join(invert))
-    text = build_config(chosen, align, invert, heights)
+    text = build_config(chosen, align, invert, heights, rattle_hp=rattle is not None)
     exe = shutil.which("camilladsp") or "/usr/local/bin/camilladsp"
     with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as tmp:
         tmp.write(text)
