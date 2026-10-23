@@ -20,7 +20,7 @@ Usage: ./set-eq.py [<scale> <max_freq_hz>] [--set=NAME] [--skip=a,b] [--dry]
   --align=bed  same, but only for the 5.1 bed (FL FR FC SL SR + LFE); the two heights are left untouched.
 
   --heights    high-pass the two height speakers (LR4) and send what they lose, low-passed and summed, to the
-               LFE channel (the sub). Add --heights-hp=120 (Hz, default 120), --heights-lfe=0 (dB, default 0: gain of
+               LFE channel (the sub). Add --heights-hp=140 (Hz, default 140), --heights-lfe=0 (dB, default 0: gain of
                the height bass as it joins the LFE), --heights-delay=0 (ms, extra delay of that bass path),
                --heights-invert (flip its polarity), --heights-tone (tone-match the heights to the bed, see HEIGHT_TONE).
 
@@ -213,9 +213,16 @@ ALIGN = {
 # bins differ by 3-5 dB between the two heights in the 0.5-3 kHz range (ceiling reflections / comb filtering) and
 # a one-seat measurement cannot be EQ'd narrowly. Re-measure after applying.
 HEIGHT_TONE = [
-    ("ht_290", {"type": "Peaking", "freq": 290, "gain": -7.0, "q": 1.5}),
-    ("ht_hs", {"type": "Highshelf", "freq": 3000, "gain": 4.0, "q": 0.7}),
+    ("ht_310", {"type": "Peaking", "freq": 310, "gain": -7.5, "q": 1.0}),
+    ("ht_1700", {"type": "Peaking", "freq": 1700, "gain": -7.0, "q": 2.5}),
+    ("ht_hs", {"type": "Highshelf", "freq": 6000, "gain": 2.5, "q": 0.8}),
 ]
+HEIGHT_TONE_TRIM_DB = 3.0     # the cuts lower the heights' mean level by about 3.4 dB (300 Hz-4 kHz); this puts most of it back
+# Fitted on 23 Oct 2026 (sweep1, CamillaDSP in the path) to what BOTH heights agree on, against the mean of the five bed
+# speakers: 310 Hz and 1.7 kHz humps (+5 dB, also seen in the REW sweeps and the pan test) and the shortfall at 4-8 kHz.
+# Narrow features that differ between RL and RR (ceiling reflections, comb filtering) are deliberately left alone.
+
+
 HEIGHT_CH = (2, 3)
 HEIGHT_BUS = 8       # internal 9th channel: the sum of the two heights, low-passed, then added to the LFE
 
@@ -231,6 +238,7 @@ def height_blocks(hp, lfe_gain, tone, delay=0.0, invert=False):
     if tone:
         for n, p in HEIGHT_TONE:
             f += f"  {n}:\n    type: Biquad\n    parameters: {{{', '.join(f'{k}: {v}' for k, v in p.items())}}}\n"
+        f += f"  ht_trim:\n    type: Gain\n    parameters: {{gain: {HEIGHT_TONE_TRIM_DB}, inverted: false, mute: false}}\n"
     m = "  heights_in:\n    channels: {in: 8, out: 9}\n    mapping:\n"
     for d in range(8):
         m += f"      - dest: {d}\n        sources:\n          - {{channel: {d}, gain: 0.0}}\n"
@@ -244,7 +252,7 @@ def height_blocks(hp, lfe_gain, tone, delay=0.0, invert=False):
     st = "  - type: Mixer\n    name: heights_in\n"
     st += f"  - type: Filter\n    channels: [{HEIGHT_BUS}]\n    names:\n      - h_lp_bus\n" + ("      - h_dly_bus\n" if delay > 0 else "")
     for ch in HEIGHT_CH:
-        names = [f"h_hp_{ch}"] + ([n for n, _ in HEIGHT_TONE] if tone else [])
+        names = [f"h_hp_{ch}"] + ([n for n, _ in HEIGHT_TONE] + ["ht_trim"] if tone else [])
         st += f"  - type: Filter\n    channels: [{ch}]\n    names:\n" + "".join(f"      - {n}\n" for n in names)
     st += "  - type: Mixer\n    name: heights_out\n"
     return f, m, st
@@ -299,7 +307,7 @@ def main():
             invert = [v.strip().upper() for v in x.split("=", 1)[1].split(",") if v.strip()]
     heights = None
     if "--heights" in sys.argv:
-        heights = {"hp": 120, "lfe_gain": 0.0, "tone": "--heights-tone" in sys.argv}
+        heights = {"hp": 140, "lfe_gain": 0.0, "tone": "--heights-tone" in sys.argv}
         for x in sys.argv[1:]:
             if x.startswith("--heights-hp="):
                 heights["hp"] = float(x.split("=", 1)[1])
@@ -348,7 +356,7 @@ def main():
     if heights:
         print(f"Heights: LR4 high-pass at {heights['hp']:g} Hz on RL/RR height; their sum, LR4 low-passed at the same "
               f"frequency, joins the LFE at {heights['lfe_gain']:+.1f} dB" + (f", delayed {heights['delay']:g} ms" if heights.get("delay") else "") + (", polarity inverted" if heights.get("invert") else "") + ("; tone-match: " + ", ".join(
-                  f"{p['type']} {p['freq']} Hz {p['gain']:+.1f} dB" for _, p in HEIGHT_TONE) if heights["tone"] else ""))
+                  f"{p['type']} {p['freq']} Hz {p['gain']:+.1f} dB" for _, p in HEIGHT_TONE) + f", trim {HEIGHT_TONE_TRIM_DB:+.1f} dB" if heights["tone"] else ""))
     if dry:
         return
 
