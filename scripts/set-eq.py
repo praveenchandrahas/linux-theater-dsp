@@ -207,11 +207,12 @@ ALIGN = {
 
 # Tone-match for the two ceiling heights, from MODULE 7 of the pan test (23 Oct 2026, each speaker alone, pink noise,
 # seat position, relative to the mean of FL FR C SL SR). Heights were 3-5 dB low above 4 kHz (TFL -4.9, TFR -3.1)
-# and both showed a bump of about +7 dB around 250 Hz. Only broad, shared features are corrected: single 1/3-octave
+# and both showed a bump of +4 to +8 dB at 250-315 Hz. REW sweeps of BL/BR on 19 Oct 2026 (before any DSP) agree: both
+# peak at 250-315 Hz, about +10 to +12 dB over their own 400 Hz-1 kHz level, falling steeply above 315 Hz. Only broad, shared features are corrected: single 1/3-octave
 # bins differ by 3-5 dB between the two heights in the 0.5-3 kHz range (ceiling reflections / comb filtering) and
 # a one-seat measurement cannot be EQ'd narrowly. Re-measure after applying.
 HEIGHT_TONE = [
-    ("ht_250", {"type": "Peaking", "freq": 250, "gain": -4.0, "q": 1.0}),
+    ("ht_290", {"type": "Peaking", "freq": 290, "gain": -7.0, "q": 1.5}),
     ("ht_hs", {"type": "Highshelf", "freq": 3000, "gain": 4.0, "q": 0.7}),
 ]
 HEIGHT_CH = (2, 3)
