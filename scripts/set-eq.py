@@ -19,6 +19,10 @@ Usage: ./set-eq.py [<scale> <max_freq_hz>] [--set=NAME] [--skip=a,b] [--dry]
   --invert=FC  flip the polarity of the named channels (comma list: FL,FR,RL,RR,FC,LFE,SL,SR).
   --align=bed  same, but only for the 5.1 bed (FL FR FC SL SR + LFE); the two heights are left untouched.
 
+  --heights    high-pass the two height speakers (LR4) and send what they lose, low-passed and summed, to the
+               LFE channel (the sub). Add --heights-hp=120 (Hz, default 120), --heights-lfe=0 (dB, default 0: gain of
+               the height bass as it joins the LFE), --heights-tone (tone-match the heights to the bed, see HEIGHT_TONE).
+
 Examples:
   ./set-eq.py --set=hump14             deliberate hump, middle size
   ./set-eq.py --set=thump14            same, with extra weight at 63 Hz
@@ -28,7 +32,7 @@ Examples:
   ./set-eq.py 1.0 200 --skip=bass_4,bass_5     REW set without the two ~60 Hz cuts
   ./set-eq.py 0 300                    effectively bypassed
 
-Channels filtered (hardware order FL FR RL RR FC LFE SL SR): 0,1,4,5,6,7. Heights (2,3) untouched.
+Channels filtered (hardware order FL FR RL RR FC LFE SL SR): 0,1,4,5,6,7. Heights (2,3) untouched unless --heights.
 """
 import cmath, math, os, shutil, subprocess, sys, tempfile, time
 
@@ -201,15 +205,61 @@ ALIGN = {
 }
 
 
+# Tone-match for the two ceiling heights, from MODULE 7 of the pan test (23 Oct 2026, each speaker alone, pink noise,
+# seat position, relative to the mean of FL FR C SL SR). Heights were 3-5 dB low above 4 kHz (TFL -4.9, TFR -3.1)
+# and both showed a bump of about +7 dB around 250 Hz. Only broad, shared features are corrected: single 1/3-octave
+# bins differ by 3-5 dB between the two heights in the 0.5-3 kHz range (ceiling reflections / comb filtering) and
+# a one-seat measurement cannot be EQ'd narrowly. Re-measure after applying.
+HEIGHT_TONE = [
+    ("ht_250", {"type": "Peaking", "freq": 250, "gain": -4.0, "q": 1.0}),
+    ("ht_hs", {"type": "Highshelf", "freq": 3000, "gain": 4.0, "q": 0.7}),
+]
+HEIGHT_CH = (2, 3)
+HEIGHT_BUS = 8       # internal 9th channel: the sum of the two heights, low-passed, then added to the LFE
+
+
+def height_blocks(hp, lfe_gain, tone):
+    """Returns (filters_yaml, mixers_yaml, steps_yaml) for the heights-to-LFE bass management."""
+    f = ""
+    for ch in HEIGHT_CH:
+        f += f"  h_hp_{ch}:\n    type: BiquadCombo\n    parameters: {{type: LinkwitzRileyHighpass, freq: {hp}, order: 4}}\n"
+    f += f"  h_lp_bus:\n    type: BiquadCombo\n    parameters: {{type: LinkwitzRileyLowpass, freq: {hp}, order: 4}}\n"
+    if tone:
+        for n, p in HEIGHT_TONE:
+            f += f"  {n}:\n    type: Biquad\n    parameters: {{{', '.join(f'{k}: {v}' for k, v in p.items())}}}\n"
+    m = "  heights_in:\n    channels: {in: 8, out: 9}\n    mapping:\n"
+    for d in range(8):
+        m += f"      - dest: {d}\n        sources:\n          - {{channel: {d}, gain: 0.0}}\n"
+    m += f"      - dest: {HEIGHT_BUS}\n        sources:\n" + "".join(f"          - {{channel: {c}, gain: 0.0}}\n" for c in HEIGHT_CH)
+    m += "  heights_out:\n    channels: {in: 9, out: 8}\n    mapping:\n"
+    for d in range(8):
+        if d == 5:
+            m += f"      - dest: 5\n        sources:\n          - {{channel: 5, gain: 0.0}}\n          - {{channel: {HEIGHT_BUS}, gain: {lfe_gain}}}\n"
+        else:
+            m += f"      - dest: {d}\n        sources:\n          - {{channel: {d}, gain: 0.0}}\n"
+    st = "  - type: Mixer\n    name: heights_in\n"
+    st += f"  - type: Filter\n    channels: [{HEIGHT_BUS}]\n    names:\n      - h_lp_bus\n"
+    for ch in HEIGHT_CH:
+        names = [f"h_hp_{ch}"] + ([n for n, _ in HEIGHT_TONE] if tone else [])
+        st += f"  - type: Filter\n    channels: [{ch}]\n    names:\n" + "".join(f"      - {n}\n" for n in names)
+    st += "  - type: Mixer\n    name: heights_out\n"
+    return f, m, st
+
+
 INVERT_CH = {"FL": 0, "FR": 1, "RL": 2, "RR": 3, "FC": 4, "LFE": 5, "SL": 6, "SR": 7}
 
 
-def build_config(chosen, align=None, invert=()):
+def build_config(chosen, align=None, invert=(), heights=None):
     """chosen: list of (name, freq, gain, q). Returns the CamillaDSP YAML text."""
     text = HEAD + "\nfilters:\n"
     for n, f, g, q in chosen:
         text += f"  {n}:\n    type: Biquad\n    parameters: {{type: Peaking, freq: {f}, gain: {g}, q: {q}}}\n"
     steps = ""
+    hmix = ""
+    if heights:
+        hf, hmix, hst = height_blocks(**heights)
+        text += hf
+        steps += hst
     if chosen:
         steps += f"  - type: Filter\n    channels: {CHANNELS}\n    names:\n"
         steps += "".join(f"      - {n}\n" for n, *_ in chosen)
@@ -230,6 +280,8 @@ def build_config(chosen, align=None, invert=()):
                 names.append(f"al_gain_{ch}")
             if names:
                 steps += f"  - type: Filter\n    channels: [{ch}]\n    names:\n" + "".join(f"      - {n}\n" for n in names)
+    if hmix:
+        text += "\nmixers:\n" + hmix
     text += "\npipeline:\n" + steps if steps else "\npipeline: []\n"
     return text
 
@@ -241,6 +293,14 @@ def main():
     for x in sys.argv[1:]:
         if x.startswith("--invert="):
             invert = [v.strip().upper() for v in x.split("=", 1)[1].split(",") if v.strip()]
+    heights = None
+    if "--heights" in sys.argv:
+        heights = {"hp": 120, "lfe_gain": 0.0, "tone": "--heights-tone" in sys.argv}
+        for x in sys.argv[1:]:
+            if x.startswith("--heights-hp="):
+                heights["hp"] = float(x.split("=", 1)[1])
+            elif x.startswith("--heights-lfe="):
+                heights["lfe_gain"] = float(x.split("=", 1)[1])
     align = "bed" if "--align=bed" in sys.argv else ("all" if "--align" in sys.argv else None)
     setname, skip = "rew", set()
     for x in sys.argv[1:]:
@@ -278,6 +338,10 @@ def main():
                 print(f"  channel {ch} {label:<10} untouched")
                 continue
             print(f"  channel {ch} {label:<10} delay {delay:5.2f} ms   trim {trim:+.1f} dB")
+    if heights:
+        print(f"Heights: LR4 high-pass at {heights['hp']:g} Hz on RL/RR height; their sum, LR4 low-passed at the same "
+              f"frequency, joins the LFE at {heights['lfe_gain']:+.1f} dB" + ("; tone-match: " + ", ".join(
+                  f"{p['type']} {p['freq']} Hz {p['gain']:+.1f} dB" for _, p in HEIGHT_TONE) if heights["tone"] else ""))
     if dry:
         return
 
@@ -287,7 +351,7 @@ def main():
         sys.exit(1)
     if invert:
         print("Polarity inverted on:", ", ".join(invert))
-    text = build_config(chosen, align, invert)
+    text = build_config(chosen, align, invert, heights)
     exe = shutil.which("camilladsp") or "/usr/local/bin/camilladsp"
     with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as tmp:
         tmp.write(text)
