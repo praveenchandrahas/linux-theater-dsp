@@ -217,7 +217,7 @@ HEIGHT_TONE = [
     ("ht_1700", {"type": "Peaking", "freq": 1700, "gain": -7.0, "q": 2.5}),
     ("ht_hs", {"type": "Highshelf", "freq": 6000, "gain": 2.5, "q": 0.8}),
 ]
-HEIGHT_TONE_TRIM_DB = 3.0     # the cuts lower the heights' mean level by about 3.4 dB (300 Hz-4 kHz); this puts most of it back
+HEIGHT_TONE_TRIM_DB = 1.0     # sweep1 predicted +3.4 dB, but sweep2 (measured with +3.0 applied) put the heights 2-3 dB above the bed in 300 Hz-4 kHz; +1.0 is the compromise (uncertainty about +-1.5 dB)
 # Fitted on 23 Oct 2026 (sweep1, CamillaDSP in the path) to what BOTH heights agree on, against the mean of the five bed
 # speakers: 310 Hz and 1.7 kHz humps (+5 dB, also seen in the REW sweeps and the pan test) and the shortfall at 4-8 kHz.
 # Narrow features that differ between RL and RR (ceiling reflections, comb filtering) are deliberately left alone.
