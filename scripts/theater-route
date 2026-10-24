@@ -6,6 +6,13 @@
   eq ensure                 start camilladsp.service and theater-router.service if they are not running (mpv-atmos calls this)
   eq on | off | toggle      EQ on  = mpv -> CamillaDSP -> USB interface (bass EQ, delays, trims)
                             EQ off = mpv -> USB interface directly (nothing from CamillaDSP at all)
+  eq mode [auto|film|stereo|bed]   which CamillaDSP profile is used. auto (default) picks it from what is playing:
+                            Chrome (or another app matching THEATER_STEREO_APPS) -> stereo upmix, patched into CamillaDSP;
+                            mpv with Atmos -> film (no upmix); mpv with 5.1 -> bed upmix; mpv with a stereo track -> stereo upmix;
+                            idle for a while -> back to film, so the next film starts clean.
+  eq flavour stereo|bed NAME       flavour of the upmix (see docs/runbook.md)
+  eq source                 show what mpv is playing and how it is classified (use this to check detection)
+  eq prepare FILE           classify FILE with ffprobe and switch profile now (mpv-atmos calls this before starting mpv)
 
 The daemon looks at PipeWire twice a second. Whenever mpv (or mpv-atmos) shows up it links its channels
 to CamillaDSP and removes the direct route, "make before break", so there is never a silent gap. If
@@ -14,7 +21,7 @@ CamillaDSP's outputs linked to the USB interface (those links are lost every tim
 
 State: ~/.local/state/theater/eq  (contains "on" or "off"; no file = on).
 """
-import os, shutil, subprocess, sys, time
+import json, os, re, shutil, socket, subprocess, sys, time
 
 USB = os.environ.get("THEATER_USB", "alsa_output.usb-0d8c_USB_Sound_Device-00.analog-surround-71")
 PORTS = ["FL", "FR", "RL", "RR", "FC", "LFE", "SL", "SR"]          # hardware order = CamillaDSP channel 1..8
@@ -22,6 +29,16 @@ PW_LINK = os.environ.get("THEATER_PW_LINK", "pw-link")
 STATE_DIR = os.path.expanduser(os.environ.get("THEATER_STATE_DIR", "~/.local/state/theater"))
 STATE = os.path.join(STATE_DIR, "eq")
 CONFIG = os.path.expanduser(os.environ.get("THEATER_CAMILLA_CONFIG", "~/.config/camilladsp/config.yml"))
+STEREO_APPS = re.compile(os.environ.get("THEATER_STEREO_APPS", "chrom"), re.I)      # PipeWire node names of stereo apps (Chrome)
+SETEQ = os.environ.get("THEATER_SETEQ", os.path.join(os.path.dirname(os.path.realpath(__file__)), "set-eq.py"))
+MPV_SOCK = os.environ.get("THEATER_MPV_SOCK", os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "theater-mpv.sock"))
+MIN_GAP = float(os.environ.get("THEATER_MIN_GAP", "8"))             # s between profile switches (a switch restarts CamillaDSP)
+IDLE_RESET = float(os.environ.get("THEATER_IDLE_RESET", "120"))     # s of silence before going back to the film profile
+UNKNOWN_GRACE = float(os.environ.get("THEATER_UNKNOWN_GRACE", "8"))  # s to wait for mpv to report its track before assuming film
+DEFAULT_FLAVOUR = {"stereo": "balanced", "bed": "balanced"}
+FLAVOURS = {"stereo": ("voice", "balanced", "wide"), "bed": ("subtle", "balanced", "wide")}
+PMODES = ("auto", "film", "stereo", "bed")
+KEEP = object()                                                       # "no decision yet, leave the profile as it is"
 
 
 def log(msg):
@@ -83,13 +100,14 @@ def cam_in(i):
     return f"camilladsp-capture:input_{i + 1}"
 
 
-def apply(mode, out=None):
+def apply(mode, out=None, profile="film"):
     """Bring the graph to the wanted state. Safe to call at any time, as often as you like."""
     out = out if out is not None else port_set("-o")
     inn = port_set("-i")
     if out is None or inn is None:
         return None
     mpv = [p for p in PORTS if f"mpv:output_{p}" in out]
+    apps = stereo_apps(out)
     cam_out_up = all(cam_out(i) in out for i in range(8))
     cam_in_up = all(cam_in(i) in inn for i in range(8))
     usb_up = all(f"{USB}:playback_{p}" in inn for p in PORTS)
@@ -99,17 +117,21 @@ def apply(mode, out=None):
     if cam_out_up and usb_up:
         for i, p in enumerate(PORTS):
             g.add(cam_out(i), f"{USB}:playback_{p}")
+    dsp_ready = (cam_out_up and cam_in_up and usb_up
+                 and all(g.has(cam_out(i), f"{USB}:playback_{p}") for i, p in enumerate(PORTS)))
+    parts = route_apps(g, apps, mode == "on" and dsp_ready and profile.startswith("stereo")) if apps else []
     if not mpv:
-        return "idle"
+        return "; ".join(parts) if parts else "idle"
+    return "; ".join([route_mpv(g, mpv, mode, dsp_ready, usb_up)] + parts)
 
+
+def route_mpv(g, mpv, mode, dsp_ready, usb_up):
     def direct(p):
         return f"mpv:output_{p}", f"{USB}:playback_{p}"
 
     def via(p):
         return f"mpv:output_{p}", cam_in(PORTS.index(p))
 
-    dsp_ready = (cam_out_up and cam_in_up and usb_up
-                 and all(g.has(cam_out(i), f"{USB}:playback_{p}") for i, p in enumerate(PORTS)))
     use_dsp = (mode == "on") and dsp_ready
 
     if use_dsp:
@@ -133,6 +155,234 @@ def apply(mode, out=None):
             why = "EQ off" if mode == "off" else "CamillaDSP not ready"
             return f"mpv {len(mpv)}ch direct ({why})"
     return f"mpv {len(mpv)}ch: USB interface not found"
+
+
+def stereo_apps(out):
+    """{node name: [FL, FR] or [MONO]} for playing apps that match THEATER_STEREO_APPS (Chrome and friends)."""
+    apps = {}
+    for p in out:
+        node, _, port = p.rpartition(":")
+        if node and not node.startswith(("mpv", "camilladsp-")) and port in ("output_FL", "output_FR", "output_MONO") \
+                and STEREO_APPS.search(node):
+            apps.setdefault(node, []).append(port[len("output_"):])
+    return apps
+
+
+def route_apps(g, apps, via_dsp):
+    """Patch each stereo app into CamillaDSP FL/FR (make before break), or leave it alone / hand it back when not wanted."""
+    msgs = []
+    for name, ports in sorted(apps.items()):
+        want = [(f"{name}:output_{p}", cam_in(i)) for p in ports for i in ((0, 1) if p == "MONO" else (0,) if p == "FL" else (1,))]
+        srcs = {f"{name}:output_{p}" for p in ports}
+        if via_dsp:
+            added = [(a, b) for a, b in want if not g.has(a, b)]
+            for a, b in added:
+                g.add(a, b)
+            if all(g.has(a, b) for a, b in want):
+                for a, b in list(g.links):                  # only now drop whatever else the app was linked to
+                    if a in srcs and not b.startswith("camilladsp-capture:"):
+                        g.delete(a, b)
+                msgs.append(f"{name} {len(ports)}ch via CamillaDSP")
+                continue
+            for a, b in added:
+                g.delete(a, b)
+            msgs.append(f"{name}: could not patch into CamillaDSP")
+        else:
+            for a, b in want:
+                g.delete(a, b)                              # the audio system re-links the app to its normal output
+            msgs.append(f"{name} on its own output")
+    return msgs
+
+
+# ---------------------------------------------------------------- profiles: what is playing -> which CamillaDSP config
+def read_state(name, default):
+    try:
+        with open(os.path.join(STATE_DIR, name)) as f:
+            return f.read().strip() or default
+    except OSError:
+        return default
+
+
+def write_state(name, value):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = os.path.join(STATE_DIR, name + ".tmp")
+    with open(tmp, "w") as f:
+        f.write(value + "\n")
+    os.replace(tmp, os.path.join(STATE_DIR, name))
+
+
+def read_pmode():
+    v = read_state("profile-mode", "auto")
+    return v if v in PMODES else "auto"
+
+
+def read_flavours():
+    fl = dict(DEFAULT_FLAVOUR)
+    for kind in fl:
+        v = read_state(f"flavour-{kind}", fl[kind])
+        if v in FLAVOURS[kind]:
+            fl[kind] = v
+    return fl
+
+
+def with_flavour(kind, flav):
+    return "film" if kind == "film" else f"{kind}:{flav[kind]}"
+
+
+def current_profile():
+    """The profile the running CamillaDSP config was generated for (header line written by set-eq.py)."""
+    try:
+        with open(CONFIG) as f:
+            for _ in range(5):
+                m = re.match(r"#\s*theater-profile:\s*(\S+)", f.readline())
+                if m:
+                    return m.group(1)
+    except OSError:
+        pass
+    return "film"
+
+
+def classify(channels, profile=""):
+    """Source description -> (kind, reason). kind: film (no upmix) | bed (5.1 -> 5.1.2) | stereo (2.0 -> 5.1.2)."""
+    if "atmos" in (profile or "").lower():
+        return "film", "Atmos: object rendering, no upmix"
+    if channels is None:
+        return "film", "channel count unknown: left as film"
+    if channels <= 2:
+        return "stereo", f"{channels}-channel track: stereo upmix"
+    if channels == 6:
+        return "bed", "5.1 track: bed upmix"
+    return "film", f"{channels}-channel track: no upmix"
+
+
+def ipc(props, sock=None, timeout=0.6):
+    """Ask the mpv IPC socket for properties. Returns {name: value} (missing/unavailable ones are absent) or None if mpv can't be reached."""
+    sock = sock or MPV_SOCK
+    got = {}
+    try:
+        c = socket.socket(socket.AF_UNIX)
+        c.settimeout(timeout)
+        c.connect(sock)
+        f = c.makefile("rw")
+        for i, name in enumerate(props):
+            f.write(json.dumps({"command": ["get_property", name], "request_id": i + 1}) + "\n")
+        f.flush()
+        want = len(props)
+        while want:
+            line = f.readline()
+            if not line:
+                break
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if "request_id" in msg:
+                want -= 1
+                if msg.get("error") == "success":
+                    got[props[msg["request_id"] - 1]] = msg.get("data")
+        c.close()
+        return got
+    except (OSError, ValueError):
+        return None
+
+
+def ffprobe_audio(path):
+    """(channels, profile, codec) of the first default audio stream of a local file, or None."""
+    if not path or "://" in path or not shutil.which("ffprobe"):
+        return None
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+                            "stream=channels,profile,codec_name:stream_disposition=default", "-of", "json", path],
+                           capture_output=True, text=True, timeout=20)
+        streams = json.loads(r.stdout or "{}").get("streams", [])
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if not streams:
+        return None
+    st = next((x for x in streams if x.get("disposition", {}).get("default")), streams[0])
+    return st.get("channels"), st.get("profile", ""), st.get("codec_name", "")
+
+
+def mpv_source():
+    """What the running mpv is playing, as {kind, why, ...}, or None while it can't be told (not ready yet / no track)."""
+    info = ipc(["current-tracks/audio", "path"])
+    if not info or not info.get("current-tracks/audio"):
+        return None
+    t = info["current-tracks/audio"]
+    channels, prof, codec = t.get("demux-channel-count"), t.get("codec-profile", ""), t.get("codec", "")
+    if channels is None:
+        probed = ffprobe_audio(info.get("path"))
+        if probed:
+            channels, prof, codec = probed
+    kind, why = classify(channels, prof)
+    return {"kind": kind, "why": why, "channels": channels, "profile": prof, "codec": codec, "path": info.get("path")}
+
+
+def want_profile(pmode, mpv_on, src, apps_on, flav):
+    """The profile that fits what is playing: a name, None (nothing playing) or KEEP (mpv is up but not identified yet)."""
+    if pmode != "auto":
+        return with_flavour(pmode, flav)
+    if mpv_on:
+        return KEEP if src is None else with_flavour(src["kind"], flav)
+    if apps_on:
+        return with_flavour("stereo", flav)
+    return None
+
+
+def decide(cur, want, now, idle_since, last_switch, force=False, min_gap=None, idle_reset=None):
+    """The profile to switch to now, or None to stay. Switching restarts CamillaDSP, so it is rate-limited."""
+    min_gap = MIN_GAP if min_gap is None else min_gap
+    idle_reset = IDLE_RESET if idle_reset is None else idle_reset
+    if want is KEEP:
+        return None
+    if want is None:
+        return "film" if (cur != "film" and idle_since is not None and now - idle_since >= idle_reset) else None
+    if want == cur or (not force and now - last_switch < min_gap):
+        return None
+    return want
+
+
+class Switcher:
+    def __init__(self):
+        self.last_switch, self.idle_since, self.mpv_since, self.src, self.src_t = -1e9, None, None, None, -1e9
+
+
+def run_seteq(profile):
+    args = ["--default"] if profile == "film" else [f"--upmix={profile}"]
+    try:
+        r = subprocess.run([sys.executable, SETEQ, *args], capture_output=True, text=True, timeout=90)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    return r.returncode == 0, (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
+
+
+def manage(out, sw, now=None, force=False):
+    """One look at what is playing; switch the CamillaDSP profile if needed. Returns a log line or None."""
+    now = time.time() if now is None else now
+    if read_mode() != "on":
+        return None
+    mpv_on = any(p.startswith("mpv:output_") for p in out)
+    apps_on = bool(stereo_apps(out))
+    src = None
+    if mpv_on:
+        sw.mpv_since = now if sw.mpv_since is None else sw.mpv_since
+        if force or now - sw.src_t >= 2.0:
+            sw.src, sw.src_t = mpv_source(), now
+        src = sw.src
+        if src is None and now - sw.mpv_since >= UNKNOWN_GRACE:
+            src = {"kind": "film", "why": "mpv did not report its track: left as film"}
+    else:
+        sw.mpv_since, sw.src = None, None
+    want = want_profile(read_pmode(), mpv_on, src, apps_on, read_flavours())
+    sw.idle_since = (now if sw.idle_since is None else sw.idle_since) if (want is None) else None
+    cur = current_profile()
+    target = decide(cur, want, now, sw.idle_since, sw.last_switch, force)
+    if target is None:
+        return None
+    ok, tail = run_seteq(target)
+    sw.last_switch = now if ok else now + 30 - MIN_GAP             # on failure, try again in 30 s
+    why = src["why"] if (mpv_on and src) else ("Chrome/stereo app playing" if apps_on else "idle")
+    return f"profile {cur} -> {target} ({why})" + ("" if ok else f"  FAILED: {tail[0] if tail else ''}")
 
 
 # ---------------------------------------------------------------- state
@@ -163,17 +413,22 @@ def notify(title, body=""):
 
 # ---------------------------------------------------------------- daemon
 def daemon():
-    last_sig, last_msg, tick = None, None, 0
+    last_sig, last_msg, tick, sw = None, None, 0, Switcher()
     log("theater-route started")
     while True:
         mode = read_mode()
         out = port_set("-o")
         if out is not None:
-            sig = (mode, frozenset(p for p in out if p.startswith(("mpv:", "camilladsp-"))))
+            watched = frozenset(p for p in out if p.startswith(("mpv:", "camilladsp-")) or STEREO_APPS.search(p.rpartition(":")[0] or ""))
+            sig = (mode, read_pmode(), watched)
             # act at once when something relevant changed; re-check everything every 2 s anyway
             if sig != last_sig or tick % 4 == 0:
                 try:
-                    msg = apply(mode, out)
+                    note = manage(out, sw)
+                    if note:
+                        log(note)
+                        out = port_set("-o") or out         # CamillaDSP was restarted: take its new ports
+                    msg = apply(mode, out, current_profile())
                 except Exception as e:                      # never let the daemon die over one bad tick
                     msg = f"error: {e}"
                 last_sig = sig
@@ -216,15 +471,24 @@ def status():
     print(f"EQ switch:     {mode.upper()}   (file {STATE})")
     print(f"Router daemon: {service_state('theater-router.service')}")
     print(f"CamillaDSP:    {service_state('camilladsp.service')}   [{config_summary()}]")
+    flav = read_flavours()
+    print(f"Profile:       {current_profile()}   (mode {read_pmode()}; flavours: stereo {flav['stereo']}, bed {flav['bed']})")
     out, inn = port_set("-o"), port_set("-i")
     if out is None or inn is None:
         print("PipeWire:      not reachable")
         return
     g = Graph()
+    for name, ports in sorted(stereo_apps(out).items()):
+        n = sum(g.has(f"{name}:output_{p}", cam_in(i)) for p in ports for i in ((0, 1) if p == "MONO" else (0,) if p == "FL" else (1,)))
+        total = sum(2 if p == "MONO" else 1 for p in ports)
+        print(f"{name}: playing, {n}/{total} channels patched into CamillaDSP" + ("" if n else "  (not patched: profile is not stereo, EQ is off or CamillaDSP is not ready)"))
     mpv = [p for p in PORTS if f"mpv:output_{p}" in out]
     if not mpv:
         print("mpv:           not playing")
         return
+    src = mpv_source()
+    print("Source:        " + (f"{src['codec']} {src['profile']} {src['channels']}ch -> {src['kind']} ({src['why']})" if src else
+                               "not identified (mpv IPC socket missing or no audio track yet; see 'eq source')"))
     d = sum(g.has(f"mpv:output_{p}", f"{USB}:playback_{p}") for p in mpv)
     v = sum(g.has(f"mpv:output_{p}", cam_in(PORTS.index(p))) for p in mpv)
     o = sum(g.has(cam_out(i), f"{USB}:playback_{p}") for i, p in enumerate(PORTS))
@@ -268,6 +532,67 @@ def set_mode(mode):
         print("EQ off. mpv plays directly (no bass EQ, no delay or level trims)." + ("" if not msg or msg == "idle" else f"  ({msg})"))
 
 
+def apply_now(force=True):
+    """Switch profile now if what is playing (or the chosen mode) calls for it, then fix the links."""
+    out = port_set("-o")
+    if out is None:
+        print("PipeWire is not reachable.")
+        return
+    note = manage(out, Switcher(), force=force)
+    if note:
+        print(note)
+        out = port_set("-o") or out
+    msg = apply(read_mode(), out, current_profile())
+    print(f"Profile now: {current_profile()}" + ("" if not msg or msg == "idle" else f"   ({msg})"))
+
+
+def cmd_mode(args):
+    if not args:
+        print(f"mode {read_pmode()}, profile {current_profile()}")
+        return
+    if args[0] not in PMODES:
+        print("usage: eq mode auto|film|stereo|bed"), sys.exit(1)
+    write_state("profile-mode", args[0])
+    print(f"Mode {args[0]}." + (" Picks the profile from what is playing." if args[0] == "auto" else " Fixed until you set auto."))
+    apply_now()
+
+
+def cmd_flavour(args):
+    if len(args) != 2 or args[0] not in FLAVOURS or args[1] not in FLAVOURS[args[0]]:
+        print("usage: eq flavour stereo " + "|".join(FLAVOURS["stereo"]) + "   or   eq flavour bed " + "|".join(FLAVOURS["bed"]))
+        sys.exit(1)
+    write_state(f"flavour-{args[0]}", args[1])
+    print(f"{args[0]} flavour: {args[1]}")
+    apply_now()
+
+
+def cmd_source():
+    info = ipc(["current-tracks/audio", "path", "audio-codec-name", "audio-params"])
+    if info is None:
+        print(f"Cannot reach mpv's IPC socket {MPV_SOCK}.\nStart mpv with --input-ipc-server={MPV_SOCK} (mpv-atmos does) or add input-ipc-server to ~/.config/mpv/mpv.conf.")
+        return
+    print(json.dumps(info, indent=1, default=str))
+    src = mpv_source()
+    print("=> " + (f"{src['kind']}: {src['why']}" if src else "no audio track reported yet"))
+
+
+def cmd_prepare(args):
+    """Called by mpv-atmos before mpv starts: choose the profile for FILE so there is no switch (and no gap) during the film."""
+    path = args[0] if args else None
+    if read_mode() != "on" or read_pmode() != "auto" or not path:
+        return
+    probed = ffprobe_audio(path)
+    if not probed:
+        return
+    kind, why = classify(probed[0], probed[1])
+    target = decide(current_profile(), with_flavour(kind, read_flavours()), time.time(), None, -1e9, force=True)
+    if target:
+        print(f"{os.path.basename(path)}: {why}; switching to {target} ...", file=sys.stderr)
+        ok, tail = run_seteq(target)
+        if not ok:
+            print("profile switch failed: " + (tail[0] if tail else ""), file=sys.stderr)
+
+
 def main():
     prog = os.path.basename(sys.argv[0])
     args = sys.argv[1:]
@@ -285,6 +610,14 @@ def main():
         status()
     elif cmd == "ensure":
         ensure()
+    elif cmd == "mode":
+        cmd_mode(args[1:])
+    elif cmd == "flavour":
+        cmd_flavour(args[1:])
+    elif cmd == "source":
+        cmd_source()
+    elif cmd == "prepare":
+        cmd_prepare(args[1:])
     else:
         print(__doc__)
         sys.exit(1)

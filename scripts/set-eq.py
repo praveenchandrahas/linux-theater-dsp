@@ -286,7 +286,8 @@ RATTLE_HP_HZ = 28.0                                                    # 2nd-ord
 
 def build_config(chosen, align=None, invert=(), heights=None, rattle_hp=False, upmix=None, head=None):
     """chosen: list of (name, freq, gain, q). upmix: (kind, flavour, ir_dir) or None. Returns the CamillaDSP YAML text."""
-    text = (head or HEAD) + "\nfilters:\n"
+    label = "film" if not upmix else f"{upmix[0]}:{upmix[1] or UPMIX.DEFAULT_FLAVOUR[upmix[0]]}"
+    text = f"# theater-profile: {label}\n" + (head or HEAD) + "\nfilters:\n"
     for n, f, g, q in chosen:
         text += f"  {n}:\n    type: Biquad\n    parameters: {{type: Peaking, freq: {f}, gain: {g}, q: {q}}}\n"
     steps = ""
