@@ -29,6 +29,13 @@ Usage: ./set-eq.py [<scale> <max_freq_hz>] [--set=NAME] [--skip=a,b] [--dry]
                which is the only EQ lever on a mechanical buzz. It costs a little of the 56-63 Hz "thump" the standing profile deliberately keeps.
                Undo by leaving the flag off (the standing profile has no rattle filters).
 
+  --upmix=KIND[:FLAVOUR]
+               add an upmix stage in front of everything else (details and limits: scripts/upmix.py).
+                 stereo[:voice|balanced|wide]   2.0 -> 5.1.2 for YouTube in Chrome and other stereo sources
+                 bed[:subtle|balanced|wide]     5.1 -> 5.1.2 for DTS-HD MA / TrueHD / FLAC 5.1 films (adds the heights)
+               Leave it off for Atmos: the objects already drive the heights. The mode is not remembered across a reset of the
+               profile: run ./set-eq.py (no arguments) to go back to the standing profile.
+
   (no arguments, or --default)
                the standing profile = --set=drone2 --align --heights --heights-tone. This is what ./make-default.sh applies.
 
@@ -45,6 +52,9 @@ Examples:
 Channels filtered (hardware order FL FR RL RR FC LFE SL SR): 0,1,4,5,6,7. Heights (2,3) untouched unless --heights.
 """
 import cmath, math, os, shutil, subprocess, sys, tempfile, time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import upmix as UPMIX
 
 FS = 48000
 CONFIG = os.path.expanduser("~/.config/camilladsp/config.yml")
@@ -274,16 +284,22 @@ RATTLE = [("rt_38", 38.0, -3.0, 2.5), ("rt_58", 58.0, -3.0, 3.0)]     # name, Hz
 RATTLE_HP_HZ = 28.0                                                    # 2nd-order Butterworth high-pass on the Z906 inputs
 
 
-def build_config(chosen, align=None, invert=(), heights=None, rattle_hp=False):
-    """chosen: list of (name, freq, gain, q). Returns the CamillaDSP YAML text."""
-    text = HEAD + "\nfilters:\n"
+def build_config(chosen, align=None, invert=(), heights=None, rattle_hp=False, upmix=None, head=None):
+    """chosen: list of (name, freq, gain, q). upmix: (kind, flavour, ir_dir) or None. Returns the CamillaDSP YAML text."""
+    text = (head or HEAD) + "\nfilters:\n"
     for n, f, g, q in chosen:
         text += f"  {n}:\n    type: Biquad\n    parameters: {{type: Peaking, freq: {f}, gain: {g}, q: {q}}}\n"
     steps = ""
     hmix = ""
+    if upmix:                                   # the upmix stage runs first; everything below sees its 8-channel result
+        uf, um, us = UPMIX.blocks(*upmix)
+        text += uf
+        hmix += um
+        steps += us
     if heights:
-        hf, hmix, hst = height_blocks(**heights)
+        hf, hm_, hst = height_blocks(**heights)
         text += hf
+        hmix += hm_
         steps += hst
     if rattle_hp:
         text += f"  rt_hp:\n    type: Biquad\n    parameters: {{type: Highpass, freq: {RATTLE_HP_HZ}, q: 0.707}}\n"
@@ -319,7 +335,7 @@ DEFAULT_ARGS = ["--set=drone2", "--align", "--heights", "--heights-tone"]
 
 def main():
     # No arguments (or --default) = the standing profile: drone2 bass set, measured alignment, heights bass-managed and tone-matched.
-    if all(a in ("--dry", "--default") or a.startswith("--rattle") for a in sys.argv[1:]):
+    if all(a in ("--dry", "--default") or a.startswith("--rattle") or a.startswith("--upmix") for a in sys.argv[1:]):
         sys.argv = [sys.argv[0]] + DEFAULT_ARGS + [a for a in sys.argv[1:] if a != "--default"]
     args = [x for x in sys.argv[1:] if not x.startswith("--")]
     dry = "--dry" in sys.argv
@@ -370,6 +386,21 @@ def main():
     if rattle is not None:
         chosen = chosen + [(n, f, round(g * rattle, 2), q) for n, f, g, q in RATTLE]
         print(f"Rattle trial: cuts at 38 Hz and 58 Hz ({-3 * rattle:+.1f} dB each) and a {RATTLE_HP_HZ:g} Hz high-pass")
+    upmix = None
+    for x in sys.argv[1:]:
+        if x.startswith("--upmix="):
+            kind, _, flav = x.split("=", 1)[1].partition(":")
+            if kind not in ("stereo", "bed"):
+                print("--upmix needs stereo or bed (optionally with :flavour), e.g. --upmix=stereo:balanced")
+                sys.exit(1)
+            try:
+                UPMIX.describe(kind, flav or None)
+                (UPMIX.STEREO if kind == "stereo" else UPMIX.BED)[flav or UPMIX.DEFAULT_FLAVOUR[kind]]
+            except KeyError:
+                print(f"Unknown {kind} flavour '{flav}'. Choose from: {', '.join(UPMIX.STEREO if kind == 'stereo' else UPMIX.BED)}")
+                sys.exit(1)
+            upmix = (kind, flav or None, os.path.join(os.path.dirname(CONFIG), "upmix"))
+            print(UPMIX.describe(kind, flav or None))
     print(f"Filter set: {setname}, scale {scale}, max {max_f:g} Hz, {len(chosen)} filters")
     if skip:
         print("Leaving these filters out:", ", ".join(sorted(skip)))
@@ -397,7 +428,7 @@ def main():
         sys.exit(1)
     if invert:
         print("Polarity inverted on:", ", ".join(invert))
-    text = build_config(chosen, align, invert, heights, rattle_hp=rattle is not None)
+    text = build_config(chosen, align, invert, heights, rattle_hp=rattle is not None, upmix=upmix)
     exe = shutil.which("camilladsp") or "/usr/local/bin/camilladsp"
     with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as tmp:
         tmp.write(text)
