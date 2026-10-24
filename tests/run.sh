@@ -6,4 +6,4 @@ python3 test_router.py
 python3 test_seteq.py
 python3 test_engine.py
 python3 test_drift.py
-bash -n ../scripts/install-autoroute.sh ../scripts/mpv-atmos ../scripts/route-mpv.sh ../scripts/rec.sh ../scripts/tone-test.sh ../scripts/install-autoroute.sh && echo "PASS shell syntax"
+bash -n ../scripts/install-autoroute.sh ../scripts/mpv-atmos ../scripts/route-mpv.sh ../scripts/rec.sh ../scripts/tone-test.sh ../scripts/preflight && echo "PASS shell syntax"
