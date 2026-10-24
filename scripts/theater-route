@@ -38,6 +38,7 @@ UNKNOWN_GRACE = float(os.environ.get("THEATER_UNKNOWN_GRACE", "8"))  # s to wait
 DEFAULT_FLAVOUR = {"stereo": "balanced", "bed": "balanced"}
 FLAVOURS = {"stereo": ("voice", "balanced", "wide"), "bed": ("subtle", "balanced", "wide")}
 PMODES = ("auto", "film", "stereo", "bed")
+APP_GRACE = float(os.environ.get("THEATER_APP_GRACE", "4"))          # s a stereo app must keep playing before it counts (skips notification pings)
 KEEP = object()                                                       # "no decision yet, leave the profile as it is"
 
 
@@ -345,6 +346,7 @@ def decide(cur, want, now, idle_since, last_switch, force=False, min_gap=None, i
 class Switcher:
     def __init__(self):
         self.last_switch, self.idle_since, self.mpv_since, self.src, self.src_t = -1e9, None, None, None, -1e9
+        self.app_since = None
 
 
 def run_seteq(profile):
@@ -362,7 +364,9 @@ def manage(out, sw, now=None, force=False):
     if read_mode() != "on":
         return None
     mpv_on = any(p.startswith("mpv:output_") for p in out)
-    apps_on = bool(stereo_apps(out))
+    apps_present = bool(stereo_apps(out))
+    sw.app_since = (now if sw.app_since is None else sw.app_since) if apps_present else None
+    apps_on = apps_present and (force or now - sw.app_since >= APP_GRACE)
     src = None
     if mpv_on:
         sw.mpv_since = now if sw.mpv_since is None else sw.mpv_since
@@ -374,6 +378,8 @@ def manage(out, sw, now=None, force=False):
     else:
         sw.mpv_since, sw.src = None, None
     want = want_profile(read_pmode(), mpv_on, src, apps_on, read_flavours())
+    if apps_present and not apps_on and not mpv_on and read_pmode() == "auto":
+        want = KEEP                                                 # a ping or click sound, not playback (yet): do not restart CamillaDSP for it
     sw.idle_since = (now if sw.idle_since is None else sw.idle_since) if (want is None) else None
     cur = current_profile()
     target = decide(cur, want, now, sw.idle_since, sw.last_switch, force)
