@@ -10,7 +10,8 @@ UNIT=theater-router.service
 
 if [ "${1:-}" = remove ]; then
   systemctl --user disable --now "$UNIT" 2>/dev/null
-  rm -f "$UNITDIR/$UNIT" "$BIN/theater-route" "$BIN/eq"
+  systemctl --user disable --now theater-upmix.service 2>/dev/null
+  rm -f "$UNITDIR/$UNIT" "$UNITDIR/theater-upmix.service" "$BIN/theater-route" "$BIN/eq" "$BIN/set-eq.py" "$BIN/upmix.py" "$BIN/upmix_engine.py"
   systemctl --user daemon-reload
   echo "Removed. mpv stays on whatever route it has now; restart mpv to get direct sound."
   exit 0
@@ -25,6 +26,12 @@ if [ -e "$BIN/eq" ] && [ "$(readlink "$BIN/eq")" != "theater-route" ]; then
 fi
 install -m 755 "$HERE/theater-route" "$BIN/theater-route"
 ln -sf theater-route "$BIN/eq"
+# The router switches CamillaDSP profiles by running set-eq.py, and the adaptive upmix engine runs from upmix_engine.py: keep them beside it.
+for f in set-eq.py upmix.py upmix_engine.py; do
+  [ -f "$HERE/$f" ] || { echo "$f must be in the same folder as this script."; exit 1; }
+  install -m 755 "$HERE/$f" "$BIN/$f"
+done
+python3 -c "import numpy, scipy" 2>/dev/null || echo "NOTE: numpy and scipy are needed by upmix_engine.py (pip install --user numpy scipy, or your distro's python3-numpy python3-scipy). Without them the stereo upmix falls back to the fixed matrix."
 
 cat > "$UNITDIR/$UNIT" <<UNITEOF
 [Unit]
@@ -35,6 +42,21 @@ Wants=camilladsp.service
 [Service]
 ExecStart=$BIN/theater-route daemon
 Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+UNITEOF
+
+# The adaptive upmix engine: started and stopped by the router while the stereo-ad profile is active, so it is not enabled at boot.
+cat > "$UNITDIR/theater-upmix.service" <<UNITEOF
+[Unit]
+Description=Adaptive ambience engine for the stereo upmix (started by theater-router)
+After=pipewire.service
+
+[Service]
+ExecStart=/usr/bin/env python3 $BIN/upmix_engine.py run
+Restart=on-failure
 RestartSec=2
 
 [Install]

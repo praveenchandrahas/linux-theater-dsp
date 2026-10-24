@@ -66,7 +66,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
 import upmix as UP
 hp = {"hp": 140, "lfe_gain": 0.0, "tone": True}
 with tempfile.TemporaryDirectory() as td:
-    for kind, flavours in (("stereo", UP.STEREO), ("bed", UP.BED)):
+    for kind, flavours in (("stereo", UP.STEREO), ("stereo-ad", UP.STEREO), ("bed", UP.BED)):
         for fl in flavours:
             u = yaml.safe_load(S.build_config(drone2, align="all", heights=hp, upmix=(kind, fl, td)))
             check(f"upmix {kind}/{fl}: all referenced filters and mixers are defined",
@@ -85,6 +85,11 @@ with tempfile.TemporaryDirectory() as td:
     cen = {src["channel"]: src["gain"] for m in st if m["dest"] == 4 for src in m["sources"]}
     check("stereo upmix: centre gets 2c of the high-passed mid (coherent sum preserved), LFE left empty",
           abs(cen[4] - 2 * UP.STEREO["balanced"]["c"]) < 1e-5 and not [m for m in st if m["dest"] == 5 and m["sources"]])
+    ad = yaml.safe_load(S.build_config(drone2, upmix=("stereo-ad", "balanced", td)))
+    src = {m["dest"]: {x["channel"] for x in m["sources"]} for m in ad["mixers"]["up_in"]["mapping"]}
+    check("stereo-ad: surround/height feeds come from the engine inputs (7, 8, 3, 4), not synthesised from L/R",
+          src[6] == {6} and src[7] == {7} and src[2] == {2} and src[3] == {3} and src[4] == {0, 1})
+    check("stereo-ad: config header names the profile", S.build_config(drone2, upmix=("stereo-ad", "wide", td)).startswith("# theater-profile: stereo-ad:wide"))
     for n, (seed, tau) in UP.IR_SEEDS.items():
         P = np.abs(np.fft.rfft(UP.decorrelator(seed, tau_ms=tau), 8192)) ** 2
         f = np.fft.rfftfreq(8192, 1 / UP.FS)

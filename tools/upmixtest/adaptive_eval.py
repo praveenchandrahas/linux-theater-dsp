@@ -1,7 +1,9 @@
 """Fixed matrix vs adaptive ambience: instrument leak into the surround feed vs the reverb that should be there."""
 import time, numpy as np
 from scipy.signal import coherence
-import metrics as M, adaptive as A
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'scripts'))
+import metrics as M, adaptive as A, upmix_engine as EN
 FS = 48000
 n = FS * 20
 t = np.arange(n) / FS
@@ -15,6 +17,29 @@ def sparse(seed):                           # realistic: harmonic notes (12 part
         ph = 2 * np.pi * np.cumsum(f0 * (1 + 0.004 * np.sin(2 * np.pi * 5.5 * tt))) / FS
         x[s] = sum(np.sin(k * ph) / k for k in range(1, 13)) * np.exp(-2.5 * tt)
     return x / np.sqrt(np.mean(x ** 2)) * 0.1
+def split_run(L, R, parts):
+    """Streaming engine over the mixture L, R; the mask it derives is applied (with its own OLA) to each (l, r) in parts.
+    Returns the aL of the mixture and of every part, aligned to the input (engine latency removed)."""
+    eng = EN.StereoAmbience(); hop, nn = eng.hop, eng.n
+    sig = [(L, R)] + list(parts)
+    m = len(L); pad = (-m) % hop + nn
+    z = np.zeros(pad)
+    sig = [(np.concatenate([a, z]), np.concatenate([b, z])) for a, b in sig]
+    bufs = [np.zeros((2, nn)) for _ in sig]; accs = [np.zeros((2, nn)) for _ in sig]
+    outs = [np.zeros(len(sig[0][0])) for _ in sig]
+    for i in range(0, len(sig[0][0]), hop):
+        X = []
+        for k, (a, b) in enumerate(sig):
+            bufs[k][:, :-hop] = bufs[k][:, hop:]
+            bufs[k][0, -hop:], bufs[k][1, -hop:] = a[i:i + hop], b[i:i + hop]
+            X.append((np.fft.rfft(bufs[k][0] * eng.win), np.fft.rfft(bufs[k][1] * eng.win)))
+        cLL, cLR, cRL, cRR = eng.coefficients(*X[0])
+        for k, (XL, XR) in enumerate(X):
+            accs[k][:, :-hop] = accs[k][:, hop:]; accs[k][:, -hop:] = 0
+            accs[k][0] += np.fft.irfft(cLL * XL + cLR * XR, nn) * eng.win * 0.5
+            accs[k][1] += np.fft.irfft(cRL * XL + cRR * XR, nn) * eng.win * 0.5
+            outs[k][i:i + hop] = accs[k][0, :hop]
+    return [o[:m] for o in outs]
 def bandpow(x): return np.mean(M.band(x[FS:]) ** 2)
 def db(x): return 10 * np.log10(x + 1e-18)
 def report(name, inst, pan_r, rev=0.316, **kw):
@@ -22,7 +47,7 @@ def report(name, inst, pan_r, rev=0.316, **kw):
     Lc, Rc = inst + rev * rl, pan_r * inst + rev * rr
     z = np.zeros(n)
     parts = [(inst, pan_r * inst), (rev * rl, z), (z, rev * rr)]
-    aL, aR, D, ap = A.ambience(Lc, Rc, apply=parts, **kw)
+    res = split_run(Lc, Rc, parts); ap = [(r, None) for r in res[1:]]
     P_inst_L, P_rev_L = bandpow(inst), bandpow(rev * rl)
     # fixed matrix: S = (L-R)/2 applied to each part exactly
     fx = [(pl - pr) / 2 for pl, pr in parts]

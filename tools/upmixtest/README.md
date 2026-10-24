@@ -29,3 +29,7 @@ instrument and the reverb, so leak and retained ambience are exact. Results (202
 Adaptive wins where the instrument is spectrally sparse (real music and speech) and gains nothing on noise-like sources; it also gives up the exact
 cancellation of a centred source. It costs about 4-5 dB of ambience level (make-up gain) and about one STFT window of latency (~21 ms at n=1024), which is
 acceptable only on the surround/height feeds (Haas delay absorbs it), never on the fronts or centre.
+
+End to end with the real CamillaDSP (`run_adaptive.py`, streaming engine feeding the `stereo-ad` config): diffuse material matches the fixed upmix within
+about 0.5 dB in every rear/ceiling channel (make-up gain 4 dB), a mono voice sends nothing to the rear, and a hard-left instrument with reverb leaves the
+left surround at -20.7 dB instead of -6.2 dB (levels re one input channel).

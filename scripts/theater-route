@@ -11,6 +11,8 @@
                             mpv with Atmos -> film (no upmix); mpv with 5.1 -> bed upmix; mpv with a stereo track -> stereo upmix;
                             idle for a while -> back to film, so the next film starts clean.
   eq flavour stereo|bed NAME       flavour of the upmix (see docs/runbook.md)
+  eq engine [on|off]        stereo upmix with the adaptive ambience engine (scripts/upmix_engine.py, default on) or the fixed matrix.
+                            If the engine does not come up the router falls back to the fixed matrix by itself.
   eq source                 show what mpv is playing and how it is classified (use this to check detection)
   eq prepare FILE           classify FILE with ffprobe and switch profile now (mpv-atmos calls this before starting mpv)
 
@@ -36,9 +38,14 @@ MIN_GAP = float(os.environ.get("THEATER_MIN_GAP", "8"))             # s between 
 IDLE_RESET = float(os.environ.get("THEATER_IDLE_RESET", "120"))     # s of silence before going back to the film profile
 UNKNOWN_GRACE = float(os.environ.get("THEATER_UNKNOWN_GRACE", "8"))  # s to wait for mpv to report its track before assuming film
 DEFAULT_FLAVOUR = {"stereo": "balanced", "bed": "balanced"}
-FLAVOURS = {"stereo": ("voice", "balanced", "wide"), "bed": ("subtle", "balanced", "wide")}
+FLAVOURS = {"stereo": ("voice", "balanced", "wide"), "bed": ("subtle", "balanced", "wide")}   # stereo-ad shares the stereo flavour
 PMODES = ("auto", "film", "stereo", "bed")
 APP_GRACE = float(os.environ.get("THEATER_APP_GRACE", "4"))          # s a stereo app must keep playing before it counts (skips notification pings)
+ENGINE_UNIT = os.environ.get("THEATER_ENGINE_UNIT", "theater-upmix.service")
+ENGINE_GRACE = float(os.environ.get("THEATER_ENGINE_GRACE", "12"))  # s the adaptive engine gets to show up before falling back to the fixed upmix
+ENGINE_IN = [f"theater-upmix-in:input_{p}" for p in ("FL", "FR")]
+ENGINE_OUT = [f"theater-upmix-out:output_AUX{i}" for i in range(4)]    # ambience L, R, ceiling feeds -> CamillaDSP inputs SL, SR, TL, TR
+ENGINE_TO_CAM = [6, 7, 2, 3]
 KEEP = object()                                                       # "no decision yet, leave the profile as it is"
 
 
@@ -121,6 +128,11 @@ def apply(mode, out=None, profile="film"):
     dsp_ready = (cam_out_up and cam_in_up and usb_up
                  and all(g.has(cam_out(i), f"{USB}:playback_{p}") for i, p in enumerate(PORTS)))
     parts = route_apps(g, apps, mode == "on" and dsp_ready and profile.startswith("stereo")) if apps else []
+    if profile.startswith("stereo-ad") or any(p.startswith("theater-upmix") for p in out | inn):
+        eng = route_engine(g, out, inn, [f"{n}" for n in apps] + (["mpv"] if mpv and set(mpv) <= {"FL", "FR"} else []),
+                           mode == "on" and dsp_ready and profile.startswith("stereo-ad"))
+        if eng:
+            parts.append(eng)
     if not mpv:
         return "; ".join(parts) if parts else "idle"
     return "; ".join([route_mpv(g, mpv, mode, dsp_ready, usb_up)] + parts)
@@ -158,6 +170,22 @@ def route_mpv(g, mpv, mode, dsp_ready, usb_up):
     return f"mpv {len(mpv)}ch: USB interface not found"
 
 
+def route_engine(g, out, inn, sources, wanted):
+    """Adaptive upmix engine: app/mpv FL, FR -> engine inputs (in addition to their direct/CamillaDSP links), engine outputs -> CamillaDSP
+    SL SR TL TR. Removes those links again when the profile is not stereo-ad."""
+    ready = all(p in inn for p in ENGINE_IN) and all(p in out for p in ENGINE_OUT)
+    srcs = [(f"{n}:output_{p}", f"theater-upmix-in:input_{p}") for n in sources for p in ("FL", "FR") if f"{n}:output_{p}" in out]
+    outs = [(ENGINE_OUT[i], cam_in(ENGINE_TO_CAM[i])) for i in range(4)]
+    if wanted and ready:
+        for a, b in srcs + outs:
+            g.add(a, b)
+        return "adaptive engine linked"
+    for a, b in list(g.links):
+        if b.startswith("theater-upmix-in:") or a.startswith("theater-upmix-out:"):
+            g.delete(a, b)
+    return "adaptive engine not running" if wanted else ""
+
+
 def stereo_apps(out):
     """{node name: [FL, FR] or [MONO]} for playing apps that match THEATER_STEREO_APPS (Chrome and friends)."""
     apps = {}
@@ -181,7 +209,7 @@ def route_apps(g, apps, via_dsp):
                 g.add(a, b)
             if all(g.has(a, b) for a, b in want):
                 for a, b in list(g.links):                  # only now drop whatever else the app was linked to
-                    if a in srcs and not b.startswith("camilladsp-capture:"):
+                    if a in srcs and not b.startswith(("camilladsp-capture:", "theater-upmix-in:")):
                         g.delete(a, b)
                 msgs.append(f"{name} {len(ports)}ch via CamillaDSP")
                 continue
@@ -226,8 +254,18 @@ def read_flavours():
     return fl
 
 
-def with_flavour(kind, flav):
-    return "film" if kind == "film" else f"{kind}:{flav[kind]}"
+def engine_state():
+    v = read_state("engine", "on")
+    return v if v in ("on", "off", "failed") else "on"
+
+
+def with_flavour(kind, flav, engine=False):
+    """Profile name for a kind. With the adaptive engine enabled, stereo becomes stereo-ad (same flavours)."""
+    if kind == "film":
+        return "film"
+    if kind == "stereo" and engine:
+        return f"stereo-ad:{flav['stereo']}"
+    return f"{kind}:{flav[kind]}"
 
 
 def current_profile():
@@ -319,14 +357,14 @@ def mpv_source():
     return {"kind": kind, "why": why, "channels": channels, "profile": prof, "codec": codec, "path": info.get("path")}
 
 
-def want_profile(pmode, mpv_on, src, apps_on, flav):
+def want_profile(pmode, mpv_on, src, apps_on, flav, engine=False):
     """The profile that fits what is playing: a name, None (nothing playing) or KEEP (mpv is up but not identified yet)."""
     if pmode != "auto":
-        return with_flavour(pmode, flav)
+        return with_flavour(pmode, flav, engine)
     if mpv_on:
-        return KEEP if src is None else with_flavour(src["kind"], flav)
+        return KEEP if src is None else with_flavour(src["kind"], flav, engine)
     if apps_on:
-        return with_flavour("stereo", flav)
+        return with_flavour("stereo", flav, engine)
     return None
 
 
@@ -346,7 +384,39 @@ def decide(cur, want, now, idle_since, last_switch, force=False, min_gap=None, i
 class Switcher:
     def __init__(self):
         self.last_switch, self.idle_since, self.mpv_since, self.src, self.src_t = -1e9, None, None, None, -1e9
-        self.app_since = None
+        self.app_since, self.engine_since = None, None
+
+
+def engine_service(action):
+    try:
+        subprocess.run(["systemctl", "--user", action, ENGINE_UNIT], capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def engine_watch(out, sw, cur, now):
+    """Keep the adaptive engine running exactly while the stereo-ad profile is active; if it does not come up, fall back to the fixed upmix."""
+    want_engine = cur.startswith("stereo-ad")
+    active = service_state(ENGINE_UNIT) == "active"
+    if not want_engine:
+        sw.engine_since = None
+        if active:
+            engine_service("stop")
+            return "adaptive engine stopped"
+        return None
+    if not active:
+        engine_service("start")
+    inn = port_set("-i") or set()
+    if all(p in inn for p in ENGINE_IN) and all(p in out for p in ENGINE_OUT):
+        sw.engine_since = None
+        return None
+    sw.engine_since = now if sw.engine_since is None else sw.engine_since
+    if now - sw.engine_since >= ENGINE_GRACE:
+        write_state("engine", "failed")
+        sw.engine_since = None
+        return (f"adaptive engine did not come up within {ENGINE_GRACE:g} s: using the fixed upmix "
+                f"(check: systemctl --user status {ENGINE_UNIT}; retry with 'eq engine on')")
+    return None
 
 
 def run_seteq(profile):
@@ -377,14 +447,14 @@ def manage(out, sw, now=None, force=False):
             src = {"kind": "film", "why": "mpv did not report its track: left as film"}
     else:
         sw.mpv_since, sw.src = None, None
-    want = want_profile(read_pmode(), mpv_on, src, apps_on, read_flavours())
+    want = want_profile(read_pmode(), mpv_on, src, apps_on, read_flavours(), engine_state() == "on")
     if apps_present and not apps_on and not mpv_on and read_pmode() == "auto":
         want = KEEP                                                 # a ping or click sound, not playback (yet): do not restart CamillaDSP for it
     sw.idle_since = (now if sw.idle_since is None else sw.idle_since) if (want is None) else None
     cur = current_profile()
     target = decide(cur, want, now, sw.idle_since, sw.last_switch, force)
     if target is None:
-        return None
+        return engine_watch(out, sw, cur, now)
     ok, tail = run_seteq(target)
     sw.last_switch = now if ok else now + 30 - MIN_GAP             # on failure, try again in 30 s
     why = src["why"] if (mpv_on and src) else ("Chrome/stereo app playing" if apps_on else "idle")
@@ -484,6 +554,10 @@ def status():
         print("PipeWire:      not reachable")
         return
     g = Graph()
+    es = engine_state()
+    up = all(p in inn for p in ENGINE_IN) and all(p in out for p in ENGINE_OUT)
+    print(f"Adaptive engine: {es}, service {service_state(ENGINE_UNIT)}, ports {'up' if up else 'down'}"
+          + (", linked into CamillaDSP" if up and all(g.has(ENGINE_OUT[i], cam_in(ENGINE_TO_CAM[i])) for i in range(4)) else ""))
     for name, ports in sorted(stereo_apps(out).items()):
         n = sum(g.has(f"{name}:output_{p}", cam_in(i)) for p in ports for i in ((0, 1) if p == "MONO" else (0,) if p == "FL" else (1,)))
         total = sum(2 if p == "MONO" else 1 for p in ports)
@@ -572,6 +646,18 @@ def cmd_flavour(args):
     apply_now()
 
 
+def cmd_engine(args):
+    if not args:
+        print(f"adaptive engine: {engine_state()}   service: {service_state(ENGINE_UNIT)}")
+        return
+    if args[0] not in ("on", "off"):
+        print("usage: eq engine on|off     (on = adaptive ambience for the stereo upmix; off = fixed matrix)")
+        sys.exit(1)
+    write_state("engine", args[0])
+    print(f"Adaptive engine {args[0]}." + (" Stereo upmix uses the adaptive ambience engine." if args[0] == "on" else " Stereo upmix uses the fixed side-signal matrix."))
+    apply_now()
+
+
 def cmd_source():
     info = ipc(["current-tracks/audio", "path", "audio-codec-name", "audio-params"])
     if info is None:
@@ -591,7 +677,7 @@ def cmd_prepare(args):
     if not probed:
         return
     kind, why = classify(probed[0], probed[1])
-    target = decide(current_profile(), with_flavour(kind, read_flavours()), time.time(), None, -1e9, force=True)
+    target = decide(current_profile(), with_flavour(kind, read_flavours(), engine_state() == "on"), time.time(), None, -1e9, force=True)
     if target:
         print(f"{os.path.basename(path)}: {why}; switching to {target} ...", file=sys.stderr)
         ok, tail = run_seteq(target)
@@ -620,6 +706,8 @@ def main():
         cmd_mode(args[1:])
     elif cmd == "flavour":
         cmd_flavour(args[1:])
+    elif cmd == "engine":
+        cmd_engine(args[1:])
     elif cmd == "source":
         cmd_source()
     elif cmd == "prepare":

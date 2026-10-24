@@ -40,7 +40,14 @@ BED = {
     "balanced": dict(h_db=-9.0,  fm=0.50, h_d=(20.0, 25.0)),
     "wide":     dict(h_db=-6.0,  fm=0.70, h_d=(22.0, 28.0)),
 }
-DEFAULT_FLAVOUR = {"stereo": "balanced", "bed": "balanced"}
+DEFAULT_FLAVOUR = {"stereo": "balanced", "stereo-ad": "balanced", "bed": "balanced"}
+
+# stereo-ad: same flavours as stereo, but the surround and height feeds are the ambience made by scripts/upmix_engine.py
+# (an external process, linked in by the router). The engine adds ~21 ms plus buffers, so the Haas delays here are only the remainder.
+# AD_MAKEUP_DB compensates the ambience the mask removes (measured -2..-7 dB on music, tools/upmixtest/README.md).
+AD_MAKEUP_DB = 4.0
+AD_DELAYS = {"voice": ((0.0, 2.0), (2.0, 5.0)), "balanced": ((0.0, 3.0), (2.0, 6.0)), "wide": ((1.0, 5.0), (4.0, 9.0))}
+KINDS = ("stereo", "stereo-ad", "bed")
 
 CENTRE_HP = 150.0
 SUR_HP, SUR_LP = 200.0, 9000.0
@@ -123,7 +130,7 @@ def _delay(name, ms):
 
 def blocks(kind, flavour, irdir):
     """Returns (filters_yaml, mixers_yaml, steps_yaml) for the upmix stage, to be placed first in the pipeline."""
-    table = STEREO if kind == "stereo" else BED
+    table = BED if kind == "bed" else STEREO
     if flavour is None:
         flavour = DEFAULT_FLAVOUR[kind]
     if flavour not in table:
@@ -131,19 +138,28 @@ def blocks(kind, flavour, irdir):
     P = table[flavour]
     ir = write_irs(irdir)
     f, m, s = "", "", ""
-    if kind == "stereo":
+    if kind in ("stereo", "stereo-ad"):
         c, cg = P["c"], 2 * P["c"]
         gs = 2 ** 0.5 * lin(P["sur_db"])           # surround = gs * S, S = (L-R)/2
         hg = 2 ** 0.5 * lin(P["h_db"])
         hm = P["hm"]
-        m += _mixer("up_in", 8, 8, {
-            0: [(0, 1.0)], 1: [(1, 1.0)],
-            2: [(0, hg / 2 * (1 + hm)), (1, hg / 2 * (-1 + hm))],      # TL source = hg*(S + hm*M)
-            3: [(0, hg / 2 * (-1 + hm)), (1, hg / 2 * (1 + hm))],      # TR source = hg*(-S + hm*M)
-            4: [(0, 0.5), (1, 0.5)],                                   # M
-            6: [(0, gs / 2), (1, -gs / 2)],                            # SL source = gs*S
-            7: [(0, -gs / 2), (1, gs / 2)],                            # SR source = -gs*S
-        })
+        if kind == "stereo-ad":
+            gsa, hga = lin(P["sur_db"] + AD_MAKEUP_DB), lin(P["h_db"] + AD_MAKEUP_DB)
+            m += _mixer("up_in", 8, 8, {
+                0: [(0, 1.0)], 1: [(1, 1.0)], 4: [(0, 0.5), (1, 0.5)],
+                6: [(6, gsa)], 7: [(7, gsa)],                          # engine feeds AUX0/AUX1 (ambience of L, R) arrive on inputs 7, 8
+                2: [(2, hga)], 3: [(3, hga)],                          # AUX2/AUX3 (ceiling feeds) arrive on inputs 3, 4
+            })
+            P = dict(P, sur_d=AD_DELAYS[flavour][0], h_d=AD_DELAYS[flavour][1])
+        else:
+            m += _mixer("up_in", 8, 8, {
+                0: [(0, 1.0)], 1: [(1, 1.0)],
+                2: [(0, hg / 2 * (1 + hm)), (1, hg / 2 * (-1 + hm))],      # TL source = hg*(S + hm*M)
+                3: [(0, hg / 2 * (-1 + hm)), (1, hg / 2 * (1 + hm))],      # TR source = hg*(-S + hm*M)
+                4: [(0, 0.5), (1, 0.5)],                                   # M
+                6: [(0, gs / 2), (1, -gs / 2)],                            # SL source = gs*S
+                7: [(0, -gs / 2), (1, gs / 2)],                            # SR source = -gs*S
+            })
         m += _mixer("up_out", 8, 8, {
             0: [(0, 1.0), (4, -c)], 1: [(1, 1.0), (4, -c)],
             2: [(2, 1.0)], 3: [(3, 1.0)], 4: [(4, cg)], 5: [], 6: [(6, 1.0)], 7: [(7, 1.0)],
@@ -179,7 +195,10 @@ def blocks(kind, flavour, irdir):
 
 def describe(kind, flavour):
     flavour = flavour or DEFAULT_FLAVOUR[kind]
-    P = (STEREO if kind == "stereo" else BED)[flavour]
+    P = (BED if kind == "bed" else STEREO)[flavour]
+    if kind == "stereo-ad":
+        return (f"Upmix stereo -> 5.1.2, adaptive ({flavour}): centre takes {P['c']:.0%} of the phantom centre above {CENTRE_HP:g} Hz; surrounds and "
+                f"heights carry only the ambience made by upmix_engine.py (about 21 ms engine latency), {P['sur_db']:+.0f} / {P['h_db']:+.0f} dB, decorrelated")
     if kind == "stereo":
         return (f"Upmix stereo -> 5.1.2 ({flavour}): centre takes {P['c']:.0%} of the phantom centre above {CENTRE_HP:g} Hz; "
                 f"surrounds {P['sur_db']:+.0f} dB (delays {P['sur_d'][0]:g}/{P['sur_d'][1]:g} ms), heights {P['h_db']:+.0f} dB "

@@ -29,7 +29,7 @@ Usage: ./set-eq.py [<scale> <max_freq_hz>] [--set=NAME] [--skip=a,b] [--dry]
                which is the only EQ lever on a mechanical buzz. It costs a little of the 56-63 Hz "thump" the standing profile deliberately keeps.
                Undo by leaving the flag off (the standing profile has no rattle filters).
 
-  --upmix=KIND[:FLAVOUR]
+  --upmix=KIND[:FLAVOUR]   KIND = stereo | stereo-ad (adaptive, needs scripts/upmix_engine.py running) | bed
                add an upmix stage in front of everything else (details and limits: scripts/upmix.py).
                  stereo[:voice|balanced|wide]   2.0 -> 5.1.2 for YouTube in Chrome and other stereo sources
                  bed[:subtle|balanced|wide]     5.1 -> 5.1.2 for DTS-HD MA / TrueHD / FLAC 5.1 films (adds the heights)
@@ -391,14 +391,14 @@ def main():
     for x in sys.argv[1:]:
         if x.startswith("--upmix="):
             kind, _, flav = x.split("=", 1)[1].partition(":")
-            if kind not in ("stereo", "bed"):
-                print("--upmix needs stereo or bed (optionally with :flavour), e.g. --upmix=stereo:balanced")
+            if kind not in UPMIX.KINDS:
+                print("--upmix needs stereo, stereo-ad or bed (optionally with :flavour), e.g. --upmix=stereo:balanced")
                 sys.exit(1)
             try:
                 UPMIX.describe(kind, flav or None)
-                (UPMIX.STEREO if kind == "stereo" else UPMIX.BED)[flav or UPMIX.DEFAULT_FLAVOUR[kind]]
+                (UPMIX.BED if kind == "bed" else UPMIX.STEREO)[flav or UPMIX.DEFAULT_FLAVOUR[kind]]
             except KeyError:
-                print(f"Unknown {kind} flavour '{flav}'. Choose from: {', '.join(UPMIX.STEREO if kind == 'stereo' else UPMIX.BED)}")
+                print(f"Unknown {kind} flavour '{flav}'. Choose from: {', '.join(UPMIX.BED if kind == 'bed' else UPMIX.STEREO)}")
                 sys.exit(1)
             upmix = (kind, flav or None, os.path.join(os.path.dirname(CONFIG), "upmix"))
             print(UPMIX.describe(kind, flav or None))

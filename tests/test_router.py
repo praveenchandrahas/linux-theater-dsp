@@ -176,10 +176,10 @@ T.manage(out, sw, now=1000.0)
 check("manage: a short Chrome sound (notification ping) does not switch anything", (open(calls).read() if os.path.exists(calls) else "", T.manage([], sw, now=1002.0)), ("", None))
 T.manage(out, sw, now=1010.0)
 note = T.manage(out, sw, now=1010.0 + T.APP_GRACE + 1)
-check("manage: Chrome starts playing -> switches to stereo:balanced via set-eq", (note.split(" (")[0], open(calls).read().split()), ("profile film -> stereo:balanced", ["--upmix=stereo:balanced"]))
+check("manage: Chrome starts playing -> switches to stereo:balanced via set-eq", (note.split(" (")[0], open(calls).read().split()), ("profile film -> stereo-ad:balanced", ["--upmix=stereo-ad:balanced"]))
 check("manage: nothing more to do once there", T.manage(out, sw, now=1020.0), None)
 check("manage: Chrome stops, still inside the hold time -> stays", T.manage([], sw, now=1030.0), None)
-check("manage: idle long enough -> back to film", (T.manage([], sw, now=1030.0 + T.IDLE_RESET + 1) or "").split(" (")[0], "profile stereo:balanced -> film")
+check("manage: idle long enough -> back to film", (T.manage([], sw, now=1030.0 + T.IDLE_RESET + 1) or "").split(" (")[0], "profile stereo-ad:balanced -> film")
 sw2 = T.Switcher(); open(cfg, "w").write("# theater-profile: bed:balanced\\ndevices:\\n")
 check("manage: a Chrome ping during a film changes nothing", (T.manage(["mpv:output_FL", f"{CH}:output_FL", f"{CH}:output_FR"], sw2, now=7000.0, force=False)), None)
 T.write_mode("off")
@@ -222,6 +222,66 @@ sw = T.Switcher(); open(cfg, "w").write("# theater-profile: bed:balanced\ndevice
 check("manage: mpv up but no IPC yet -> keeps profile", T.manage(["mpv:output_FL"], sw, now=9100.0), None)
 check("manage: still unidentified after the grace time -> film", (T.manage(["mpv:output_FL"], sw, now=9100.0 + T.UNKNOWN_GRACE + 1, force=True) or "").split(" (")[0],
       "profile bed:balanced -> film")
+
+# ------------------------------------------------------------------ adaptive engine: links, lifecycle, fallback
+T.write_state("engine", "on")
+calls_svc = []
+T.service_state = lambda name: svc["state"]
+T.engine_service = lambda action: calls_svc.append(action)
+svc = {"state": "inactive"}
+
+
+def engine_up(st):
+    st["in"] += list(T.ENGINE_IN); st["out"] += list(T.ENGINE_OUT)
+
+
+def eng_links():
+    return sorted((a, b) for a, b in load()["links"] if a.startswith("theater-upmix-out") or b.startswith("theater-upmix-in"))
+
+
+st = {"out": [], "in": [f"{U}:playback_{p}" for p in P], "links": []}
+cam_up(st); engine_up(st); chrome_up(st); save(st)
+msg = T.apply("on", profile="stereo-ad:balanced")
+want_links = sorted([(f"{CH}:output_FL", "theater-upmix-in:input_FL"), (f"{CH}:output_FR", "theater-upmix-in:input_FR"),
+                     ("theater-upmix-out:output_AUX0", "camilladsp-capture:input_7"), ("theater-upmix-out:output_AUX1", "camilladsp-capture:input_8"),
+                     ("theater-upmix-out:output_AUX2", "camilladsp-capture:input_3"), ("theater-upmix-out:output_AUX3", "camilladsp-capture:input_4")])
+check("stereo-ad: Chrome -> engine in, engine out -> CamillaDSP SL SR TL TR", eng_links(), want_links)
+check("stereo-ad: Chrome also still feeds CamillaDSP FL/FR, direct links gone",
+      (sorted(b for _, b in chrome_links() if "camilla" in b), [b for _, b in chrome_links() if b.startswith(U)]),
+      (["camilladsp-capture:input_1", "camilladsp-capture:input_2"], []))
+before = sorted(map(tuple, load()["links"])); T.apply("on", profile="stereo-ad:balanced"); T.apply("on", profile="stereo-ad:balanced")
+check("stereo-ad: stable on repeat (no link flapping)", sorted(map(tuple, load()["links"])), before)
+check("stereo-ad: message mentions the engine", "adaptive engine linked" in msg, True)
+T.apply("on", profile="stereo:balanced")
+check("fixed stereo profile: engine links removed again", eng_links(), [])
+s2 = load(); s2["in"] = [x for x in s2["in"] if not x.startswith("theater-upmix")]; s2["out"] = [x for x in s2["out"] if not x.startswith("theater-upmix")]; save(s2)
+check("stereo-ad but engine ports missing: reported, Chrome still reaches the fronts", ("adaptive engine not running" in T.apply("on", profile="stereo-ad:balanced"),
+      sorted(b for _, b in chrome_links() if "camilla" in b)), (True, ["camilladsp-capture:input_1", "camilladsp-capture:input_2"]))
+
+# lifecycle
+cfg_w = lambda prof: open(cfg, "w").write(f"# theater-profile: {prof}\ndevices:\n")
+sw = T.Switcher(); cfg_w("stereo-ad:balanced"); svc["state"] = "inactive"; calls_svc.clear()
+st = {"out": [], "in": [f"{U}:playback_{p}" for p in P], "links": []}; cam_up(st); save(st)
+T.engine_watch(set(), sw, "stereo-ad:balanced", 100.0)
+check("lifecycle: stereo-ad profile starts the engine service", calls_svc, ["start"])
+svc["state"] = "active"; calls_svc.clear()
+check("lifecycle: leaving stereo-ad stops it", (T.engine_watch(set(), sw, "film", 101.0), calls_svc), ("adaptive engine stopped", ["stop"]))
+check("lifecycle: nothing to do when already stopped", (T.engine_watch(set(), sw, "film", 102.0) if (svc.update(state="inactive") or True) else None), None)
+
+# fallback to the fixed matrix
+svc["state"] = "active"; T.write_state("engine", "on"); sw = T.Switcher(); calls_svc.clear()
+check("fallback: engine missing, still inside the grace time -> wait", T.engine_watch(set(), sw, "stereo-ad:balanced", 1000.0), None)
+note = T.engine_watch(set(), sw, "stereo-ad:balanced", 1000.0 + T.ENGINE_GRACE + 1)
+check("fallback: grace exceeded -> engine marked failed", (T.engine_state(), "using the fixed upmix" in (note or "")), ("failed", True))
+check("fallback: want_profile now picks the fixed stereo profile", T.want_profile("auto", False, None, True, T.DEFAULT_FLAVOUR, T.engine_state() == "on"), "stereo:balanced")
+sw = T.Switcher(); cfg_w("stereo-ad:balanced"); open(calls, "w").write("")
+out = [f"{CH}:output_FL", f"{CH}:output_FR"]
+T.manage(out, sw, now=2000.0, force=True)
+check("fallback: manage switches CamillaDSP to the fixed stereo config", open(calls).read().split(), ["--upmix=stereo:balanced"])
+T.write_state("engine", "on")
+check("eq engine on clears the failure", T.engine_state(), "on")
+check("engine off -> stereo upmix is the fixed one", T.with_flavour("stereo", T.DEFAULT_FLAVOUR, False), "stereo:balanced")
+check("bed and film unaffected by the engine setting", (T.with_flavour("bed", T.DEFAULT_FLAVOUR, True), T.with_flavour("film", T.DEFAULT_FLAVOUR, True)), ("bed:balanced", "film"))
 
 print("\nALL PASS" if ok else "\nSOME FAILED")
 sys.exit(0 if ok else 1)
