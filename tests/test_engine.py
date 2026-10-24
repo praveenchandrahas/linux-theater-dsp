@@ -70,6 +70,8 @@ for i in range(0, x2.shape[1] - E.HOP, E.HOP):
 budget = E.HOP / FS
 check("average cost per hop is below 25 % of the real-time budget", np.mean(ts) < 0.25 * budget, f"({np.mean(ts) / budget * 100:.1f} %, worst {max(ts) / budget * 100:.0f} %)")
 
+mode = E.rt_setup()
+check("rt_setup returns a description and never raises", isinstance(mode, str) and mode, f"({mode})")
 pw_rec, pw_play = E.pw_cat_commands()
 check("pw-cat commands: 2-channel FL,FR capture and 4-channel AUX0-3 playback with fixed node names",
       "FL,FR" in pw_rec and "AUX0,AUX1,AUX2,AUX3" in pw_play and any("theater-upmix-in" in a for a in pw_rec) and any("theater-upmix-out" in a for a in pw_play))

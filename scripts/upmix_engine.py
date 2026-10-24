@@ -132,6 +132,7 @@ def stdio_loop(rd, wr, engine=None):
     nbytes = hop * 2 * 4
     buf = bytearray(nbytes)
     view = memoryview(buf)
+    budget, slow, last_log = hop / FS, 0, time.time()
     wr.write(np.zeros((hop, 4), "<f4").tobytes())                      # prefill one hop: a cushion so the playback side never starves (sets latency to exactly N)
     wr.flush()
     while True:
@@ -141,9 +142,15 @@ def stdio_loop(rd, wr, engine=None):
             if not r:
                 return
             got += r
+        t0 = time.perf_counter()
         x = np.frombuffer(buf, dtype="<f4").reshape(hop, 2).astype(np.float64)
         wr.write(feeds(*eng.process_hop(x[:, 0], x[:, 1])).tobytes())
         wr.flush()
+        slow += (time.perf_counter() - t0) > 0.6 * budget            # a hop that took more than 60 % of its budget is a glitch waiting to happen
+        if slow and time.time() - last_log > 60:
+            print(f"theater-upmix: {slow} slow hop(s) in the last minute (> {0.6 * budget * 1000:.1f} ms of {budget * 1000:.1f} ms): the machine is "
+                  f"busy or the process has no real-time priority", file=sys.stderr, flush=True)
+            slow, last_log = 0, time.time()
 
 
 def pw_cat_commands(latency="10ms"):
@@ -155,14 +162,31 @@ def pw_cat_commands(latency="10ms"):
     return rec, play
 
 
+def rt_setup(prio=20):
+    """Ask for real-time scheduling, the way PipeWire does. Returns a short description of what was granted:
+    'SCHED_FIFO' (direct: needs RLIMIT_RTPRIO, e.g. limits.d for the audio group), 'rtkit' (the usual route on desktops), or 'none'."""
+    try:
+        os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(prio))
+        return f"SCHED_FIFO {prio}"
+    except (OSError, AttributeError):
+        pass
+    try:                                                              # rtkit wants a finite RLIMIT_RTTIME (<= 200 ms) and the thread id
+        import resource
+        resource.setrlimit(resource.RLIMIT_RTTIME, (200000, 200000))
+        r = subprocess.run(["busctl", "--system", "call", "org.freedesktop.RealtimeKit1", "/org/freedesktop/RealtimeKit1",
+                            "org.freedesktop.RealtimeKit1", "MakeThreadRealtime", "tu", str(os.getpid()), str(prio)],
+                           capture_output=True, timeout=3)
+        if r.returncode == 0:
+            return f"rtkit priority {prio}"
+    except (OSError, ValueError, subprocess.TimeoutExpired, ImportError):
+        pass
+    return "none"
+
+
 def run():
-    try:                                                                # best effort: realtime priority, then a better nice value
-        os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(20))
-    except (OSError, AttributeError, PermissionError):
-        try:
-            os.nice(-10)
-        except OSError:
-            pass
+    mode = rt_setup()
+    print(f"theater-upmix: real-time scheduling: {mode}" + ("" if mode != "none" else
+          " (not granted: needs rtkit or an rtprio limit; clicks in the rear/ceiling feeds are possible under load)"), flush=True)
     rec_cmd, play_cmd = pw_cat_commands(os.environ.get("THEATER_ENGINE_LATENCY", "10ms"))
     rec = subprocess.Popen(rec_cmd, stdout=subprocess.PIPE, bufsize=0)
     play = subprocess.Popen(play_cmd, stdin=subprocess.PIPE, bufsize=0)
