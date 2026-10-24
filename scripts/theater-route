@@ -230,6 +230,10 @@ def status():
     o = sum(g.has(cam_out(i), f"{USB}:playback_{p}") for i, p in enumerate(PORTS))
     print(f"mpv:           {len(mpv)} channels ({' '.join(mpv)})")
     print(f"Route:         via CamillaDSP {v}/{len(mpv)}   direct {d}/{len(mpv)}   CamillaDSP -> USB {o}/8")
+    if not all(f"{USB}:playback_{p}" in inn for p in PORTS):
+        print("=> USB interface not connected (or named differently, see THEATER_USB): nothing can be routed to the rig;")
+        print("   audio plays on the default output device")
+        return
     if v == len(mpv) and d == 0:
         print("=> audio goes through CamillaDSP (EQ active)")
     elif d == len(mpv) and v == 0:
