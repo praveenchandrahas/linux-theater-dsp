@@ -6,4 +6,5 @@ python3 test_router.py
 python3 test_seteq.py
 python3 test_engine.py
 python3 test_drift.py
-bash -n ../scripts/install-autoroute.sh ../scripts/mpv-atmos ../scripts/route-mpv.sh ../scripts/rec.sh ../scripts/tone-test.sh ../scripts/preflight ../scripts/object-audio-install.sh ../scripts/mpv-object-audio && echo "PASS shell syntax"
+python3 test_seekthumbs.py
+bash -n ../scripts/install-autoroute.sh ../scripts/mpv-atmos ../scripts/route-mpv.sh ../scripts/rec.sh ../scripts/tone-test.sh ../scripts/preflight ../scripts/object-audio-install.sh ../scripts/mpv-object-audio && python3 -m py_compile ../tools/seekthumbs/seekthumbs.py && echo "PASS shell syntax"
