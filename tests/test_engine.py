@@ -75,5 +75,15 @@ check("rt_setup returns a description and never raises", isinstance(mode, str) a
 pw_rec, pw_play = E.pw_cat_commands()
 check("pw-cat commands: 2-channel FL,FR capture and 4-channel AUX0-3 playback with fixed node names",
       "FL,FR" in pw_rec and "AUX0,AUX1,AUX2,AUX3" in pw_play and any("theater-upmix-in" in a for a in pw_rec) and any("theater-upmix-out" in a for a in pw_play))
+r_old, p_old = E.pw_cat_commands(raw=False); r_new, p_new = E.pw_cat_commands(raw=True)
+check("pw-cat without --raw support (PipeWire 1.0.5): the option is left out, everything else is identical", "--raw" not in r_old and "--raw" not in p_old and "--raw" in r_new and [a for a in r_new if a != "--raw"] == r_old and [a for a in p_new if a != "--raw"] == p_old)
+import tempfile, stat
+with tempfile.TemporaryDirectory() as _td:
+    _fake = os.path.join(_td, "pw-cat"); _old_path = os.environ["PATH"]
+    for _help, _want in (("pw-cat [options]\n  -p, --playback\n  --rate\n", False), ("pw-cat [options]\n  -a, --raw   Raw mode\n", True)):
+        open(_fake, "w").write("#!/bin/sh\ncat <<'EOF'\n" + _help + "EOF\n"); os.chmod(_fake, os.stat(_fake).st_mode | stat.S_IXUSR)
+        os.environ["PATH"] = _td + os.pathsep + _old_path
+        _got = E.pw_cat_has_raw(); os.environ["PATH"] = _old_path
+        check(f"pw_cat_has_raw reads the help text ({'with' if _want else 'without'} --raw)", _got is _want)
 print("\nALL PASS" if ok else "\nSOME FAILED")
 sys.exit(0 if ok else 1)

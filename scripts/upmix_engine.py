@@ -153,8 +153,20 @@ def stdio_loop(rd, wr, engine=None):
             slow, last_log = 0, time.time()
 
 
-def pw_cat_commands(latency="10ms"):
-    base = ["pw-cat", "--raw", "--rate", str(FS), "--format", "f32", "--latency", latency]
+def pw_cat_has_raw():
+    """True when this pw-cat has the --raw option (PipeWire 1.2 or newer, as far as the help texts show). PipeWire 1.0.5 (Ubuntu 24.04) has no such
+    option and rejects it: the engine died in 170 ms on the first real run. There, '-' on stdin/stdout is raw by itself (a recording to '-' came out as
+    headerless float32). If pw-cat cannot be asked, assume the option exists."""
+    try:
+        r = subprocess.run(["pw-cat", "--help"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return "--raw" in (r.stdout + r.stderr)
+
+
+def pw_cat_commands(latency="10ms", raw=None):
+    raw = pw_cat_has_raw() if raw is None else raw
+    base = ["pw-cat"] + (["--raw"] if raw else []) + ["--rate", str(FS), "--format", "f32", "--latency", latency]
     rec = base[:1] + ["--record"] + base[1:] + ["--channels", "2", "--channel-map", "FL,FR",
           "-P", "{ node.name = theater-upmix-in node.autoconnect = false node.dont-reconnect = true media.role = DSP }", "-"]
     play = base[:1] + ["--playback"] + base[1:] + ["--channels", "4", "--channel-map", "AUX0,AUX1,AUX2,AUX3",
