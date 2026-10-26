@@ -137,6 +137,7 @@ def run_main_inprocess(argv, td):
     m.subprocess = type("SP", (), {"run": staticmethod(lambda *a, **k: R())})   # module-local stub; the real subprocess stays intact
     m.current_links = lambda: set()
     m.relink = lambda was: None
+    m.reload_in_place = lambda: False
     old = sys.argv
     sys.argv = ["set-eq.py"] + argv
     code = 0
@@ -338,6 +339,46 @@ with tempfile.TemporaryDirectory() as td:
     r = cli(["--write-config=" + os.path.join(td, "bad.yml")], td)
     check("invalid live room: refused with exit 2 and nothing written (never silently falls back)", r.returncode == 2 and not os.path.exists(os.path.join(td, "bad.yml")))
     check("invalid live room: --no-room still works", cli(["--no-room", "--write-config=" + os.path.join(td, "ok.yml")], td).returncode == 0)
+
+# ---- in-place reload (SIGHUP) with a fake systemctl / pw-link world
+def reload_world(pid_after="100", drop_port=False, drop_link=False, kill_rc=0):
+    m = fresh()
+    ports_o = {f"camilladsp-playback:output_{n}" for n in range(1, 9)}
+    ports_i = {f"camilladsp-capture:input_{n}" for n in range(1, 9)}
+    links = {(f"camilladsp-playback:output_{n}", f"usb:playback_{n}") for n in range(1, 9)} | \
+            {(f"app:output_{n}", f"camilladsp-capture:input_{n}") for n in range(1, 9)}
+    calls = []
+
+    class R:
+        def __init__(self, out="", rc=0):
+            self.stdout, self.returncode = out, rc
+
+    def run(cmd, **k):
+        calls.append(cmd)
+        if "show" in cmd:
+            return R(pid_after if any(c == "kill" for c in sum(calls[:-1], [])) else "100")
+        if "kill" in cmd:
+            if drop_port:
+                ports_o.discard("camilladsp-playback:output_3")
+            if drop_link:
+                links.discard(("app:output_1", "camilladsp-capture:input_1"))
+            return R(rc=kill_rc)
+        return R()
+    m.subprocess = type("SP", (), {"run": staticmethod(run)})
+    m.port_list = lambda flag: set(ports_o) if flag == "-o" else set(ports_i)
+    m.current_links = lambda: set(links)
+    m.time = type("T", (), {"sleep": staticmethod(lambda s: None), "time": staticmethod(__import__("time").time)})
+    return m, calls
+
+m, calls = reload_world()
+check("reload: untouched ports, links and pid -> True, and SIGHUP was sent", m.reload_in_place() and any("--signal=HUP" in c for c in calls))
+check("reload: no restart issued", not any("restart" in c for c in calls))
+check("reload: a changed main pid (it restarted) -> False", not reload_world(pid_after="200")[0].reload_in_place())
+check("reload: a missing port afterwards -> False", not reload_world(drop_port=True)[0].reload_in_place())
+check("reload: a lost link afterwards -> False", not reload_world(drop_link=True)[0].reload_in_place())
+check("reload: kill failure -> False", not reload_world(kill_rc=1)[0].reload_in_place())
+m2, _ = reload_world(); m2.subprocess = type("SP", (), {"run": staticmethod(lambda c, **k: type("R", (), {"stdout": "", "returncode": 0})())})
+check("reload: service not running (no main pid) -> False, nothing signalled", not m2.reload_in_place())
 
 print("\nALL PASS" if ok else "\nSOME FAILED")
 sys.exit(0 if ok else 1)

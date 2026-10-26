@@ -64,6 +64,8 @@ $EDITOR room.json                                               # change delays,
 ./scripts/set-eq.py --room=room.json                            # build it and load it (the normal flow, with your numbers)
 ```
 
+**Profile switches are gapless by default.** After writing the new config, `set-eq.py` sends CamillaDSP a SIGHUP so it re-reads it in place (no websocket, no change to the unit file). It then checks that the same process is still running with all 16 ports and exactly the same links; if anything differs it falls back to a full restart plus relinking, as before. `SETEQ_RELOAD=restart` forces the restart; `SETEQ_RELOAD_WAIT` (default 1.5 s) is how long it waits before checking.
+
 `room.json` is plain JSON, strictly validated (channel names `FL FR FC LFE SL SR RL RR`; delay 0-20 ms, trim -20 to +6 dB, filter freq 20-20000 Hz, gain -24 to +6 dB, Q 0.3-12; unknown keys are rejected) and never executed. Keys you leave out keep the built-in values; a bad file exits with code 2 and changes nothing. `--write-config=PATH` validates with `camilladsp -c` when the binary exists, writes PATH and does nothing else (no copy to `~/.config`, no restart, no relinking). `tests/golden/` holds configs generated before this feature existed; `tests/run.sh` checks the default profile is still byte-identical.
 
 ## Licence

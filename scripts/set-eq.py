@@ -644,8 +644,15 @@ def main():
     shutil.copy(tmp.name, CONFIG)
     os.unlink(tmp.name)
     was_via = ("mpv:output_FL", "camilladsp-capture:input_1") in current_links()
-    # A full restart is slower than a reload signal but deterministic: the ports and filters come back
-    # exactly as at boot. The links to CamillaDSP's ports are lost on restart, so they are rebuilt below.
+    # Default: tell the running CamillaDSP to re-read its config (SIGHUP, the same reload its websocket SetConfig does;
+    # nothing is listened on, the unit file is not touched). When the devices section is unchanged it keeps the PipeWire
+    # ports and their links, so the switch is gapless. Anything unexpected afterwards: full restart as before.
+    # SETEQ_RELOAD=restart forces the old behaviour.
+    if os.environ.get("SETEQ_RELOAD", "hup") != "restart" and reload_in_place():
+        print(f"\nWrote {CONFIG} and reloaded CamillaDSP in place (no restart; ports and links unchanged).")
+        return
+    # A full restart is slower but deterministic: the ports and filters come back exactly as at boot.
+    # The links to CamillaDSP's ports are lost on restart, so they are rebuilt below.
     subprocess.run(["systemctl", "--user", "restart", "camilladsp.service"], check=True)
     print(f"\nWrote {CONFIG} and restarted CamillaDSP.")
     relink(was_via)
@@ -699,6 +706,34 @@ def current_links():
         elif "|->" in line and port is not None:
             out.add((port, line.split("|->", 1)[1].strip()))
     return out
+
+
+def main_pid():
+    r = subprocess.run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "camilladsp.service"],
+                       capture_output=True, text=True)
+    pid = (r.stdout or "").strip()
+    return pid if pid.isdigit() and pid != "0" else None
+
+
+def cam_links():
+    """Links that touch CamillaDSP's ports (into camilladsp-capture, out of camilladsp-playback)."""
+    return {l for l in current_links() if l[1].startswith("camilladsp-capture:") or l[0].startswith("camilladsp-playback:")}
+
+
+def reload_in_place():
+    """SIGHUP the running CamillaDSP and check it came through untouched: same process, all 16 ports, and exactly the
+    same links. Returns True only then; False means 'do the full restart instead' (nothing is lost by trying)."""
+    pid = main_pid()
+    need = {f"camilladsp-playback:output_{n}" for n in range(1, 9)} | {f"camilladsp-capture:input_{n}" for n in range(1, 9)}
+    if pid is None or not need <= (port_list("-o") | port_list("-i")):
+        return False
+    before = cam_links()
+    if sum(l[0].startswith("camilladsp-playback:") for l in before) < 8:
+        return False                                       # not running the way we expect; do the deterministic thing
+    if subprocess.run(["systemctl", "--user", "kill", "--signal=HUP", "camilladsp.service"]).returncode != 0:
+        return False
+    time.sleep(float(os.environ.get("SETEQ_RELOAD_WAIT", "1.5")))
+    return main_pid() == pid and need <= (port_list("-o") | port_list("-i")) and cam_links() == before
 
 
 def wait_for_ports(timeout):
