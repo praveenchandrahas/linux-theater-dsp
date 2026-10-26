@@ -36,6 +36,14 @@ Usage: ./set-eq.py [<scale> <max_freq_hz>] [--set=NAME] [--skip=a,b] [--dry]
                Leave it off for Atmos: the objects already drive the heights. The mode is not remembered across a reset of the
                profile: run ./set-eq.py (no arguments) to go back to the standing profile.
 
+  --dump-room  print the current room (ALIGN, height tone, base bass set) as room.json and exit. Writes nothing.
+  --room=FILE  override the room from a room.json (JSON only, strictly validated; missing keys keep the defaults built into
+               this file). Its bass.base_set is used unless --set is given; bass.extra_filters (peaking cuts/boosts) are
+               appended to the bass set on the same channels. A bad file exits with code 2 and changes nothing.
+  --write-config=PATH   build the config, check it with `camilladsp -c` if that binary exists (else say so and skip), write
+               it to PATH and do NOTHING else: no copy to ~/.config, no restart, no relinking. Not combinable with --upmix.
+               Example: ./set-eq.py --room=room.json --write-config=/tmp/proposed.yml
+
   (no arguments, or --default)
                the standing profile = --set=drone2 --align --heights --heights-tone. This is what ./make-default.sh applies.
 
@@ -51,7 +59,7 @@ Examples:
 
 Channels filtered (hardware order FL FR RL RR FC LFE SL SR): 0,1,4,5,6,7. Heights (2,3) untouched unless --heights.
 """
-import cmath, math, os, shutil, subprocess, sys, tempfile, time
+import cmath, json, math, os, re, shutil, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import upmix as UPMIX
@@ -277,6 +285,156 @@ def height_blocks(hp, lfe_gain, tone, delay=0.0, invert=False):
     return f, m, st
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# room.json: the room's numbers (ALIGN, HEIGHT_TONE, HEIGHT_TONE_TRIM_DB, base bass set) in one validated JSON file.
+# The module-level values above remain the single source of the current room; --dump-room prints them, --room=FILE
+# overrides them. JSON only (no code is ever executed), unknown keys are rejected.
+ROOM_CH = {"FL": 0, "FR": 1, "RL": 2, "RR": 3, "FC": 4, "LFE": 5, "SL": 6, "SR": 7}   # name -> hardware index
+ROOM_ORDER = ["FL", "FR", "FC", "LFE", "SL", "SR", "RL", "RR"]                       # order used in room.json
+DEFAULT_BASE_SET = "drone2"
+ROOM_MAX_BYTES = 1 << 20
+ROOM_TONE_TYPES = ("Peaking", "Highshelf", "Lowshelf")
+ROOM_RANGES = {"delay_ms": (0.0, 20.0), "trim_db": (-20.0, 6.0), "freq": (20.0, 20000.0), "gain": (-24.0, 6.0), "q": (0.3, 12.0)}
+ROOM_RESERVED = ("al_", "h_hp_", "h_lp_", "h_dly_", "inv_", "up_", "rt_", "ht_trim")
+
+
+class RoomError(ValueError):
+    pass
+
+
+def room_dump(base_set=DEFAULT_BASE_SET, extra_filters=()):
+    """The current room as a room.json dict (version 1)."""
+    return {
+        "version": 1,
+        "align": {n: {"delay_ms": ALIGN[ROOM_CH[n]][1], "trim_db": ALIGN[ROOM_CH[n]][2]} for n in ROOM_ORDER},
+        "height_tone": {"filters": [dict(name=n, **p) for n, p in HEIGHT_TONE], "trim_db": HEIGHT_TONE_TRIM_DB},
+        "bass": {"base_set": base_set, "extra_filters": [dict(f) for f in extra_filters]},
+    }
+
+
+def _num(v, key, where):
+    lo, hi = ROOM_RANGES[key]
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or v in (float("inf"), float("-inf")):
+        raise RoomError(f"{where}.{key}: expected a number, got {v!r}")
+    if not lo <= v <= hi:
+        raise RoomError(f"{where}.{key}: {v} is outside the allowed range {lo:g}..{hi:g}")
+    return v
+
+
+def _keys(d, allowed, where, required=()):
+    if not isinstance(d, dict):
+        raise RoomError(f"{where}: expected an object, got {type(d).__name__}")
+    unknown = sorted(set(d) - set(allowed))
+    if unknown:
+        raise RoomError(f"{where}: unknown key(s) {', '.join(map(repr, unknown))} (allowed: {', '.join(allowed)})")
+    missing = [k for k in required if k not in d]
+    if missing:
+        raise RoomError(f"{where}: missing key(s) {', '.join(missing)}")
+
+
+def _filter_name(v, where, seen):
+    if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,31}", v):
+        raise RoomError(f"{where}.name: must be 1-32 letters, digits or _, starting with a letter, got {v!r}")
+    if v.startswith(ROOM_RESERVED) or v in seen:
+        raise RoomError(f"{where}.name: {v!r} is reserved or already used by another filter")
+    seen.add(v)
+    return v
+
+
+def validate_room(doc):
+    """Strictly validate a parsed room.json; returns a normalised dict holding only the keys that were given. Raises RoomError."""
+    _keys(doc, ("version", "align", "height_tone", "bass"), "room", required=("version",))
+    if isinstance(doc["version"], bool) or doc["version"] != 1:
+        raise RoomError(f"room.version: only version 1 is supported, got {doc['version']!r}")
+    out = {}
+    if "align" in doc:
+        _keys(doc["align"], ROOM_ORDER, "align")
+        out["align"] = {}
+        for n, v in doc["align"].items():
+            _keys(v, ("delay_ms", "trim_db"), f"align.{n}")
+            out["align"][n] = {k: _num(x, k, f"align.{n}") for k, x in v.items()}
+    seen = set(n for fs in FILTER_SETS.values() for n, *_ in fs) | {"ht_trim"}
+    if "height_tone" in doc:
+        ht = doc["height_tone"]
+        _keys(ht, ("filters", "trim_db"), "height_tone")
+        out["height_tone"] = {}
+        if "trim_db" in ht:
+            out["height_tone"]["trim_db"] = _num(ht["trim_db"], "trim_db", "height_tone")
+        if "filters" in ht:
+            if not isinstance(ht["filters"], list) or len(ht["filters"]) > 16:
+                raise RoomError("height_tone.filters: expected a list of at most 16 filters")
+            fl = []
+            for i, f in enumerate(ht["filters"]):
+                w = f"height_tone.filters[{i}]"
+                _keys(f, ("name", "type", "freq", "gain", "q"), w, required=("name", "type", "freq", "gain", "q"))
+                if f["type"] not in ROOM_TONE_TYPES:
+                    raise RoomError(f"{w}.type: must be one of {', '.join(ROOM_TONE_TYPES)}, got {f['type']!r}")
+                fl.append((_filter_name(f["name"], w, seen),
+                           {"type": f["type"], "freq": _num(f["freq"], "freq", w), "gain": _num(f["gain"], "gain", w), "q": _num(f["q"], "q", w)}))
+            out["height_tone"]["filters"] = fl
+    if "bass" in doc:
+        b = doc["bass"]
+        _keys(b, ("base_set", "extra_filters"), "bass")
+        out["bass"] = {}
+        if "base_set" in b:
+            if b["base_set"] not in FILTER_SETS:
+                raise RoomError(f"bass.base_set: unknown set {b['base_set']!r} (choose from: {', '.join(FILTER_SETS)})")
+            out["bass"]["base_set"] = b["base_set"]
+        if "extra_filters" in b:
+            if not isinstance(b["extra_filters"], list) or len(b["extra_filters"]) > 32:
+                raise RoomError("bass.extra_filters: expected a list of at most 32 filters")
+            ex = []
+            for i, f in enumerate(b["extra_filters"]):
+                w = f"bass.extra_filters[{i}]"
+                _keys(f, ("name", "freq", "gain", "q"), w, required=("name", "freq", "gain", "q"))
+                ex.append((_filter_name(f["name"], w, seen), _num(f["freq"], "freq", w), _num(f["gain"], "gain", w), _num(f["q"], "q", w)))
+            out["bass"]["extra_filters"] = ex
+    return out
+
+
+def _no_dupes(pairs):
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise RoomError(f"duplicate key {k!r}")
+        d[k] = v
+    return d
+
+
+def _no_const(c):
+    raise RoomError(f"{c} is not valid JSON")
+
+
+def load_room(path):
+    """Read and validate a room.json file. Raises RoomError on any problem."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(ROOM_MAX_BYTES + 1)
+    except OSError as e:
+        raise RoomError(f"cannot read {path}: {e.strerror or e}")
+    if len(raw) > ROOM_MAX_BYTES:
+        raise RoomError(f"{path}: file is larger than {ROOM_MAX_BYTES} bytes")
+    try:
+        doc = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_dupes, parse_constant=_no_const)
+    except (ValueError, UnicodeDecodeError) as e:
+        raise RoomError(f"{path}: not valid JSON: {e}")
+    return validate_room(doc)
+
+
+def apply_room(room):
+    """Override the module's ALIGN / HEIGHT_TONE / HEIGHT_TONE_TRIM_DB with a validated room (missing keys keep the defaults)."""
+    global HEIGHT_TONE_TRIM_DB
+    for n, v in room.get("align", {}).items():
+        ch = ROOM_CH[n]
+        label, delay, trim = ALIGN[ch]
+        ALIGN[ch] = (label, v.get("delay_ms", delay), v.get("trim_db", trim))
+    ht = room.get("height_tone", {})
+    if "filters" in ht:
+        HEIGHT_TONE[:] = ht["filters"]
+    if "trim_db" in ht:
+        HEIGHT_TONE_TRIM_DB = ht["trim_db"]
+
+
 INVERT_CH = {"FL": 0, "FR": 1, "RL": 2, "RR": 3, "FC": 4, "LFE": 5, "SL": 6, "SR": 7}
 
 
@@ -331,12 +489,41 @@ def build_config(chosen, align=None, invert=(), heights=None, rattle_hp=False, u
     return text
 
 
-DEFAULT_ARGS = ["--set=drone2", "--align", "--heights", "--heights-tone"]
+DEFAULT_ARGS = [f"--set={DEFAULT_BASE_SET}", "--align", "--heights", "--heights-tone"]
+
+
+def _opt(name):
+    for x in sys.argv[1:]:
+        if x.startswith(name + "="):
+            return x.split("=", 1)[1]
+    return None
 
 
 def main():
+    explicit_set = any(a.startswith("--set=") for a in sys.argv[1:])
+    room, write_to = {}, _opt("--write-config")
+    if "--write-config" in sys.argv[1:] or write_to == "":
+        print("--write-config needs a path: --write-config=PATH", file=sys.stderr)
+        sys.exit(2)
+    if "--room" in sys.argv[1:] or _opt("--room") == "":
+        print("--room needs a file: --room=FILE", file=sys.stderr)
+        sys.exit(2)
+    if _opt("--room") is not None:
+        try:
+            room = load_room(_opt("--room"))
+        except RoomError as e:
+            print(f"Invalid room file, nothing changed: {e}", file=sys.stderr)
+            sys.exit(2)
+        apply_room(room)
+    if "--dump-room" in sys.argv[1:]:
+        b = room.get("bass", {})
+        print(json.dumps(room_dump(b.get("base_set", DEFAULT_BASE_SET), [dict(name=n, freq=f, gain=g, q=q) for n, f, g, q in b.get("extra_filters", [])]), indent=2))
+        return
+    if write_to is not None and any(a.startswith("--upmix") for a in sys.argv[1:]):
+        print("--write-config cannot be combined with --upmix (the upmix stage writes decorrelator files).", file=sys.stderr)
+        sys.exit(2)
     # No arguments (or --default) = the standing profile: drone2 bass set, measured alignment, heights bass-managed and tone-matched.
-    if all(a in ("--dry", "--default") or a.startswith("--rattle") or a.startswith("--upmix") for a in sys.argv[1:]):
+    if all(a in ("--dry", "--default") or a.startswith(("--rattle", "--upmix", "--room=", "--write-config=")) for a in sys.argv[1:]):
         sys.argv = [sys.argv[0]] + DEFAULT_ARGS + [a for a in sys.argv[1:] if a != "--default"]
     args = [x for x in sys.argv[1:] if not x.startswith("--")]
     dry = "--dry" in sys.argv
@@ -362,6 +549,8 @@ def main():
             setname = x.split("=", 1)[1]
         elif x.startswith("--skip="):
             skip = set(x.split("=", 1)[1].split(","))
+    if "base_set" in room.get("bass", {}) and not explicit_set:
+        setname = room["bass"]["base_set"]
     if setname not in FILTER_SETS:
         print(f"Unknown --set '{setname}'. Choose from: {', '.join(FILTER_SETS)}")
         sys.exit(1)
@@ -378,6 +567,7 @@ def main():
         print("Unknown filter name(s) in --skip for this set:", ", ".join(sorted(unknown)))
         sys.exit(1)
     chosen = [(n, f, round(g * scale, 2), q) for n, f, g, q in filters if f <= max_f and n not in skip]
+    chosen = chosen + [(n, f, g, q) for n, f, g, q in room.get("bass", {}).get("extra_filters", [])]
     rattle = None
     for x in sys.argv[1:]:
         if x == "--rattle":
@@ -430,6 +620,9 @@ def main():
     if invert:
         print("Polarity inverted on:", ", ".join(invert))
     text = build_config(chosen, align, invert, heights, rattle_hp=rattle is not None, upmix=upmix)
+    if write_to is not None:
+        write_config_only(text, write_to)
+        return
     exe = shutil.which("camilladsp") or "/usr/local/bin/camilladsp"
     with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as tmp:
         tmp.write(text)
@@ -445,6 +638,33 @@ def main():
     subprocess.run(["systemctl", "--user", "restart", "camilladsp.service"], check=True)
     print(f"\nWrote {CONFIG} and restarted CamillaDSP.")
     relink(was_via)
+
+
+def write_config_only(text, path):
+    """--write-config: validate with camilladsp -c if available, write PATH, do nothing else."""
+    exe = shutil.which("camilladsp")
+    if exe:
+        with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as tmp:
+            tmp.write(text)
+        try:
+            check = subprocess.run([exe, "-c", tmp.name], capture_output=True, text=True)
+        finally:
+            os.unlink(tmp.name)
+        if check.returncode != 0:
+            print("Config check FAILED, nothing written:\n", check.stdout, check.stderr)
+            sys.exit(1)
+        note = "checked with camilladsp -c"
+    else:
+        note = "camilladsp not found, config NOT validated"
+    tmp_path = f"{path}.tmp{os.getpid()}"
+    try:
+        with open(tmp_path, "w") as fh:
+            fh.write(text)
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+    print(f"Wrote {path} ({note}). Nothing else was changed.")
 
 
 USB = "alsa_output.usb-0d8c_USB_Sound_Device-00.analog-surround-71"

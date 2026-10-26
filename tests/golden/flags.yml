@@ -1,0 +1,249 @@
+# theater-profile: film
+devices:
+  samplerate: 48000
+  chunksize: 1024
+
+  capture:
+    type: PipeWire
+    channels: 8
+    node_name: camilladsp-capture
+    node_description: CamillaDSP Capture
+
+  playback:
+    type: PipeWire
+    channels: 8
+    node_name: camilladsp-playback
+    node_description: CamillaDSP Playback
+
+filters:
+  q20_1:
+    type: Biquad
+    parameters: {type: Peaking, freq: 47.06, gain: -10.26, q: 5.0}
+  q20_2:
+    type: Biquad
+    parameters: {type: Peaking, freq: 60.66, gain: -2.51, q: 5.0}
+  q20_3:
+    type: Biquad
+    parameters: {type: Peaking, freq: 85.3, gain: -4.87, q: 5.0}
+  q20_4:
+    type: Biquad
+    parameters: {type: Peaking, freq: 107.09, gain: -4.06, q: 5.0}
+  q20_5:
+    type: Biquad
+    parameters: {type: Peaking, freq: 142.27, gain: -1.82, q: 5.0}
+  q20_6:
+    type: Biquad
+    parameters: {type: Peaking, freq: 154.88, gain: -5.44, q: 4.99}
+  q20_7:
+    type: Biquad
+    parameters: {type: Peaking, freq: 176.64, gain: -3.97, q: 5.0}
+  q20_8:
+    type: Biquad
+    parameters: {type: Peaking, freq: 250.37, gain: -5.01, q: 5.0}
+  d2_1:
+    type: Biquad
+    parameters: {type: Peaking, freq: 72.0, gain: -6.0, q: 8.0}
+  d2_2:
+    type: Biquad
+    parameters: {type: Peaking, freq: 84.0, gain: -6.0, q: 4.0}
+  h_hp_2:
+    type: BiquadCombo
+    parameters: {type: LinkwitzRileyHighpass, freq: 120.0, order: 4}
+  h_hp_3:
+    type: BiquadCombo
+    parameters: {type: LinkwitzRileyHighpass, freq: 120.0, order: 4}
+  h_lp_bus:
+    type: BiquadCombo
+    parameters: {type: LinkwitzRileyLowpass, freq: 120.0, order: 4}
+  h_dly_bus:
+    type: Delay
+    parameters: {delay: 1.5, unit: ms, subsample: false}
+  ht_310:
+    type: Biquad
+    parameters: {type: Peaking, freq: 310, gain: -7.5, q: 1.0}
+  ht_1700:
+    type: Biquad
+    parameters: {type: Peaking, freq: 1700, gain: -7.0, q: 2.5}
+  ht_hs:
+    type: Biquad
+    parameters: {type: Highshelf, freq: 6000, gain: 2.5, q: 0.8}
+  ht_trim:
+    type: Gain
+    parameters: {gain: 1.0, inverted: false, mute: false}
+  al_delay_0:
+    type: Delay
+    parameters: {delay: 0.2, unit: ms, subsample: false}
+  al_gain_1:
+    type: Gain
+    parameters: {gain: -1.9, inverted: false, mute: false}
+  al_delay_2:
+    type: Delay
+    parameters: {delay: 4.6, unit: ms, subsample: false}
+  al_gain_2:
+    type: Gain
+    parameters: {gain: -0.6, inverted: false, mute: false}
+  al_delay_3:
+    type: Delay
+    parameters: {delay: 4.7, unit: ms, subsample: false}
+  al_gain_3:
+    type: Gain
+    parameters: {gain: -0.3, inverted: false, mute: false}
+  al_delay_4:
+    type: Delay
+    parameters: {delay: 0.97, unit: ms, subsample: false}
+  al_gain_4:
+    type: Gain
+    parameters: {gain: -0.8, inverted: false, mute: false}
+  al_delay_5:
+    type: Delay
+    parameters: {delay: 0.2, unit: ms, subsample: false}
+  al_delay_6:
+    type: Delay
+    parameters: {delay: 3.0, unit: ms, subsample: false}
+  al_gain_6:
+    type: Gain
+    parameters: {gain: -4.4, inverted: false, mute: false}
+  al_delay_7:
+    type: Delay
+    parameters: {delay: 2.72, unit: ms, subsample: false}
+  al_gain_7:
+    type: Gain
+    parameters: {gain: -0.7, inverted: false, mute: false}
+
+mixers:
+  heights_in:
+    channels: {in: 8, out: 9}
+    mapping:
+      - dest: 0
+        sources:
+          - {channel: 0, gain: 0.0}
+      - dest: 1
+        sources:
+          - {channel: 1, gain: 0.0}
+      - dest: 2
+        sources:
+          - {channel: 2, gain: 0.0}
+      - dest: 3
+        sources:
+          - {channel: 3, gain: 0.0}
+      - dest: 4
+        sources:
+          - {channel: 4, gain: 0.0}
+      - dest: 5
+        sources:
+          - {channel: 5, gain: 0.0}
+      - dest: 6
+        sources:
+          - {channel: 6, gain: 0.0}
+      - dest: 7
+        sources:
+          - {channel: 7, gain: 0.0}
+      - dest: 8
+        sources:
+          - {channel: 2, gain: 0.0}
+          - {channel: 3, gain: 0.0}
+  heights_out:
+    channels: {in: 9, out: 8}
+    mapping:
+      - dest: 0
+        sources:
+          - {channel: 0, gain: 0.0}
+      - dest: 1
+        sources:
+          - {channel: 1, gain: 0.0}
+      - dest: 2
+        sources:
+          - {channel: 2, gain: 0.0}
+      - dest: 3
+        sources:
+          - {channel: 3, gain: 0.0}
+      - dest: 4
+        sources:
+          - {channel: 4, gain: 0.0}
+      - dest: 5
+        sources:
+          - {channel: 5, gain: 0.0}
+          - {channel: 8, gain: 0.0, inverted: true}
+      - dest: 6
+        sources:
+          - {channel: 6, gain: 0.0}
+      - dest: 7
+        sources:
+          - {channel: 7, gain: 0.0}
+
+pipeline:
+  - type: Mixer
+    name: heights_in
+  - type: Filter
+    channels: [8]
+    names:
+      - h_lp_bus
+      - h_dly_bus
+  - type: Filter
+    channels: [2]
+    names:
+      - h_hp_2
+      - ht_310
+      - ht_1700
+      - ht_hs
+      - ht_trim
+  - type: Filter
+    channels: [3]
+    names:
+      - h_hp_3
+      - ht_310
+      - ht_1700
+      - ht_hs
+      - ht_trim
+  - type: Mixer
+    name: heights_out
+  - type: Filter
+    channels: [0, 1, 4, 5, 6, 7]
+    names:
+      - q20_1
+      - q20_2
+      - q20_3
+      - q20_4
+      - q20_5
+      - q20_6
+      - q20_7
+      - q20_8
+      - d2_1
+      - d2_2
+  - type: Filter
+    channels: [0]
+    names:
+      - al_delay_0
+  - type: Filter
+    channels: [1]
+    names:
+      - al_gain_1
+  - type: Filter
+    channels: [2]
+    names:
+      - al_delay_2
+      - al_gain_2
+  - type: Filter
+    channels: [3]
+    names:
+      - al_delay_3
+      - al_gain_3
+  - type: Filter
+    channels: [4]
+    names:
+      - al_delay_4
+      - al_gain_4
+  - type: Filter
+    channels: [5]
+    names:
+      - al_delay_5
+  - type: Filter
+    channels: [6]
+    names:
+      - al_delay_6
+      - al_gain_6
+  - type: Filter
+    channels: [7]
+    names:
+      - al_delay_7
+      - al_gain_7

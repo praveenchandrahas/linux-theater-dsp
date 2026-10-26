@@ -53,8 +53,19 @@ tests/run.sh                    # 149 checks, no hardware
 Paths, user names, the PipeWire/ALSA names of the author's 7.1 USB interface (a Vantec), and every delay, trim and EQ value in `scripts/set-eq.py` are **from the author's machine and room**. Change them for yours:
 the interface name in `set-eq.py` and the units, and the `ALIGN` / EQ tables after you have measured your own room.
 
+The room numbers (per-speaker delay and trim, the height-speaker tone match and trim, the bass set) can be kept in one JSON file, `room.json`, instead of editing the tables:
+
+```
+./scripts/set-eq.py --dump-room > room.json                     # the built-in room (the author's) as a template
+$EDITOR room.json                                               # change delays, trims, height tone, bass.base_set, bass.extra_filters
+./scripts/set-eq.py --room=room.json --write-config=/tmp/proposed.yml   # build and check a config; nothing else is touched
+./scripts/set-eq.py --room=room.json                            # build it and load it (the normal flow, with your numbers)
+```
+
+`room.json` is plain JSON, strictly validated (channel names `FL FR FC LFE SL SR RL RR`; delay 0-20 ms, trim -20 to +6 dB, filter freq 20-20000 Hz, gain -24 to +6 dB, Q 0.3-12; unknown keys are rejected) and never executed. Keys you leave out keep the built-in values; a bad file exits with code 2 and changes nothing. `--write-config=PATH` validates with `camilladsp -c` when the binary exists, writes PATH and does nothing else (no copy to `~/.config`, no restart, no relinking). `tests/golden/` holds configs generated before this feature existed; `tests/run.sh` checks the default profile is still byte-identical.
+
 ## Licence
 
 [Apache License 2.0](LICENSE) (see also [NOTICE](NOTICE)). Dolby, Dolby Atmos, DTS and DTS:X are trademarks of their owners; this project is not affiliated with or endorsed by them. It contains no media files and no decoder code.
 
-Part of the [software-defined home theatre](https://github.com/praveenchandrahas/sdht) project (documentation, measurements and the build log live there).
+Part of the [software-defined home theatre](https://github.com/praveenchandrahas/SDHT) project (documentation, measurements and the build log live there).
