@@ -8,7 +8,7 @@
                             EQ off = mpv -> USB interface directly (nothing from CamillaDSP at all)
   eq mode [auto|film|stereo|bed]   which CamillaDSP profile is used. auto (default) picks it from what is playing:
                             Chrome (or another app matching THEATER_STEREO_APPS) -> stereo upmix, patched into CamillaDSP;
-                            mpv with Atmos -> film (no upmix); mpv with 5.1 -> bed upmix; mpv with a stereo track -> stereo upmix;
+                            mpv with Atmos or DTS:X -> film (no upmix); mpv with 5.1 -> bed upmix; mpv with a stereo track -> stereo upmix;
                             idle for a while -> back to film, so the next film starts clean.
   eq flavour stereo|bed NAME       flavour of the upmix (see docs/runbook.md)
   eq engine [on|off]        stereo upmix with the adaptive ambience engine (scripts/upmix_engine.py, default on) or the fixed matrix.
@@ -283,8 +283,11 @@ def current_profile():
 
 def classify(channels, profile=""):
     """Source description -> (kind, reason). kind: film (no upmix) | bed (5.1 -> 5.1.2) | stereo (2.0 -> 5.1.2)."""
-    if "atmos" in (profile or "").lower():
+    prof = (profile or "").lower()
+    if "atmos" in prof:
         return "film", "Atmos: object rendering, no upmix"
+    if "dts:x" in prof or "dts-x" in prof or "dtsx" in prof:           # ffmpeg/mpv name it "DTS-HD MA + DTS:X" (also "... + DTS:X IMAX")
+        return "film", "DTS:X: object rendering, no upmix"
     if channels is None:
         return "film", "channel count unknown: left as film"
     if channels <= 2:

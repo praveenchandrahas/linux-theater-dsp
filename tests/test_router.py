@@ -132,6 +132,9 @@ check("only matching apps are touched (other app ignored)", T.stereo_apps(["Spot
 
 check("classify: Atmos TrueHD -> film", T.classify(8, "Dolby TrueHD + Dolby Atmos")[0], "film")
 check("classify: Atmos E-AC-3 (6ch) -> film, not bed", T.classify(6, "Dolby Digital Plus + Dolby Atmos")[0], "film")
+check("classify: DTS:X (6ch core) -> film, not bed", T.classify(6, "DTS-HD MA + DTS:X")[0], "film")
+check("classify: DTS:X IMAX -> film", T.classify(8, "DTS-HD MA + DTS:X IMAX")[0], "film")
+check("classify: DTS-HD MA 7.1 without X -> film, as before", T.classify(8, "DTS-HD MA")[0], "film")
 check("classify: plain 5.1 -> bed", T.classify(6, "DTS-HD MA")[0], "bed")
 check("classify: stereo -> stereo", T.classify(2, "")[0], "stereo")
 check("classify: 7.1 -> film", T.classify(8, "")[0], "film")
