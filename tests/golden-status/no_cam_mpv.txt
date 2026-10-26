@@ -1,0 +1,9 @@
+EQ switch:     ON   (file <STATE>/eq)
+Router daemon: active
+CamillaDSP:    active   [bass set drone2, bed alignment: yes, heights: bass to sub + tone-match]
+Profile:       film   (mode auto; flavours: stereo balanced, bed balanced)
+Adaptive engine: on, service active, ports down
+Source:        truehd Dolby TrueHD + Dolby Atmos 8ch -> film (Atmos: object rendering, no upmix)
+mpv:           8 channels (FL FR RL RR FC LFE SL SR)
+Route:         via CamillaDSP 0/8   direct 8/8   CamillaDSP -> USB 0/8
+=> audio goes direct to the USB interface (no EQ)

@@ -1,0 +1,6 @@
+EQ switch:     ON   (file <STATE>/eq)
+Router daemon: active
+CamillaDSP:    active   [bass set drone2, bed alignment: yes, heights: bass to sub + tone-match]
+Profile:       film   (mode auto; flavours: stereo balanced, bed balanced)
+Adaptive engine: on, service active, ports up, linked into CamillaDSP
+mpv:           not playing

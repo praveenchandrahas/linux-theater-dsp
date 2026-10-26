@@ -1,0 +1,10 @@
+EQ switch:     ON   (file <STATE>/eq)
+Router daemon: active
+CamillaDSP:    active   [bass set drone2, bed alignment: yes, heights: bass to sub + tone-match]
+Profile:       film   (mode auto; flavours: stereo balanced, bed balanced)
+Adaptive engine: on, service active, ports down
+Source:        not identified (mpv IPC socket missing or no audio track yet; see 'eq source')
+mpv:           2 channels (FL FR)
+Route:         via CamillaDSP 0/2   direct 2/2   CamillaDSP -> USB 0/8
+=> USB interface not connected (or named differently, see THEATER_USB): nothing can be routed to the rig;
+   audio plays on the default output device

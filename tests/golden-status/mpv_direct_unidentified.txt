@@ -1,0 +1,9 @@
+EQ switch:     ON   (file <STATE>/eq)
+Router daemon: active
+CamillaDSP:    active   [bass set drone2, bed alignment: yes, heights: bass to sub + tone-match]
+Profile:       film   (mode auto; flavours: stereo balanced, bed balanced)
+Adaptive engine: on, service active, ports down
+Source:        not identified (mpv IPC socket missing or no audio track yet; see 'eq source')
+mpv:           8 channels (FL FR RL RR FC LFE SL SR)
+Route:         via CamillaDSP 0/8   direct 8/8   CamillaDSP -> USB 8/8
+=> audio goes direct to the USB interface (no EQ)

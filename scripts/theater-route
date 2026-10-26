@@ -2,7 +2,7 @@
 """theater-route / eq : keep mpv routed through CamillaDSP automatically, with an on/off switch.
 
   theater-route daemon      run forever (this is what the systemd user service does)
-  eq status                 show what is happening right now
+  eq status [--json]        show what is happening right now (--json: the same facts as one JSON object, for scripts and the status page)
   eq ensure                 start camilladsp.service and theater-router.service if they are not running (mpv-atmos calls this)
   eq on | off | toggle      EQ on  = mpv -> CamillaDSP -> USB interface (bass EQ, delays, trims)
                             EQ off = mpv -> USB interface directly (nothing from CamillaDSP at all)
@@ -545,48 +545,94 @@ def config_summary():
     return ", ".join(parts)
 
 
-def status():
-    mode = read_mode()
-    print(f"EQ switch:     {mode.upper()}   (file {STATE})")
-    print(f"Router daemon: {service_state('theater-router.service')}")
-    print(f"CamillaDSP:    {service_state('camilladsp.service')}   [{config_summary()}]")
-    flav = read_flavours()
-    print(f"Profile:       {current_profile()}   (mode {read_pmode()}; flavours: stereo {flav['stereo']}, bed {flav['bed']})")
+def collect_status():
+    """Everything `eq status` knows, as one dict (schema 1). `eq status --json` prints it; status() renders it as text."""
+    d = {"schema": 1, "time": int(time.time()),
+         "eq": {"switch": read_mode(), "state_file": STATE, "router": service_state("theater-router.service"),
+                "camilla": service_state("camilladsp.service"), "camilla_summary": config_summary()},
+         "dsp": {"profile": current_profile(), "pmode": read_pmode(), "flavours": read_flavours()},
+         "pipewire": True, "apps": [], "usb_up": None,
+         "mpv": {"playing": False, "channels": [], "source": None, "route": None, "verdict": None}}
     out, inn = port_set("-o"), port_set("-i")
     if out is None or inn is None:
-        print("PipeWire:      not reachable")
-        return
+        d["pipewire"] = False
+        return d
     g = Graph()
-    es = engine_state()
     up = all(p in inn for p in ENGINE_IN) and all(p in out for p in ENGINE_OUT)
-    print(f"Adaptive engine: {es}, service {service_state(ENGINE_UNIT)}, ports {'up' if up else 'down'}"
-          + (", linked into CamillaDSP" if up and all(g.has(ENGINE_OUT[i], cam_in(ENGINE_TO_CAM[i])) for i in range(4)) else ""))
+    d["dsp"]["engine"] = {"state": engine_state(), "service": service_state(ENGINE_UNIT), "ports_up": up,
+                          "linked": bool(up and all(g.has(ENGINE_OUT[i], cam_in(ENGINE_TO_CAM[i])) for i in range(4)))}
     for name, ports in sorted(stereo_apps(out).items()):
         n = sum(g.has(f"{name}:output_{p}", cam_in(i)) for p in ports for i in ((0, 1) if p == "MONO" else (0,) if p == "FL" else (1,)))
         total = sum(2 if p == "MONO" else 1 for p in ports)
-        print(f"{name}: playing, {n}/{total} channels patched into CamillaDSP" + ("" if n else "  (not patched: profile is not stereo, EQ is off or CamillaDSP is not ready)"))
+        d["apps"].append({"name": name, "patched": n, "total": total})
     mpv = [p for p in PORTS if f"mpv:output_{p}" in out]
     if not mpv:
-        print("mpv:           not playing")
-        return
+        return d
+    m = d["mpv"]
+    m["playing"], m["channels"] = True, mpv
     src = mpv_source()
-    print("Source:        " + (f"{src['codec']} {src['profile']} {src['channels']}ch -> {src['kind']} ({src['why']})" if src else
-                               "not identified (mpv IPC socket missing or no audio track yet; see 'eq source')"))
-    d = sum(g.has(f"mpv:output_{p}", f"{USB}:playback_{p}") for p in mpv)
+    m["source"] = ({"codec": src["codec"], "profile": src["profile"], "channels": src["channels"], "kind": src["kind"], "why": src["why"]}
+                   if src else None)
+    dd = sum(g.has(f"mpv:output_{p}", f"{USB}:playback_{p}") for p in mpv)
     v = sum(g.has(f"mpv:output_{p}", cam_in(PORTS.index(p))) for p in mpv)
     o = sum(g.has(cam_out(i), f"{USB}:playback_{p}") for i, p in enumerate(PORTS))
-    print(f"mpv:           {len(mpv)} channels ({' '.join(mpv)})")
-    print(f"Route:         via CamillaDSP {v}/{len(mpv)}   direct {d}/{len(mpv)}   CamillaDSP -> USB {o}/8")
-    if not all(f"{USB}:playback_{p}" in inn for p in PORTS):
+    m["route"] = {"via": v, "direct": dd, "to_usb": o, "channels": len(mpv)}
+    d["usb_up"] = all(f"{USB}:playback_{p}" in inn for p in PORTS)
+    if not d["usb_up"]:
+        m["verdict"] = "usb-missing"
+    elif v == len(mpv) and dd == 0:
+        m["verdict"] = "cam"
+    elif dd == len(mpv) and v == 0:
+        m["verdict"] = "direct"
+    else:
+        m["verdict"] = "mixed"
+    return d
+
+
+def render_status(d):
+    """The classic text of `eq status`, built from collect_status()."""
+    e, dsp = d["eq"], d["dsp"]
+    print(f"EQ switch:     {e['switch'].upper()}   (file {e['state_file']})")
+    print(f"Router daemon: {e['router']}")
+    print(f"CamillaDSP:    {e['camilla']}   [{e['camilla_summary']}]")
+    flav = dsp["flavours"]
+    print(f"Profile:       {dsp['profile']}   (mode {dsp['pmode']}; flavours: stereo {flav['stereo']}, bed {flav['bed']})")
+    if not d["pipewire"]:
+        print("PipeWire:      not reachable")
+        return
+    en = dsp["engine"]
+    print(f"Adaptive engine: {en['state']}, service {en['service']}, ports {'up' if en['ports_up'] else 'down'}"
+          + (", linked into CamillaDSP" if en["linked"] else ""))
+    for a in d["apps"]:
+        print(f"{a['name']}: playing, {a['patched']}/{a['total']} channels patched into CamillaDSP"
+              + ("" if a["patched"] else "  (not patched: profile is not stereo, EQ is off or CamillaDSP is not ready)"))
+    m = d["mpv"]
+    if not m["playing"]:
+        print("mpv:           not playing")
+        return
+    src = m["source"]
+    print("Source:        " + (f"{src['codec']} {src['profile']} {src['channels']}ch -> {src['kind']} ({src['why']})" if src else
+                               "not identified (mpv IPC socket missing or no audio track yet; see 'eq source')"))
+    r = m["route"]
+    print(f"mpv:           {len(m['channels'])} channels ({' '.join(m['channels'])})")
+    print(f"Route:         via CamillaDSP {r['via']}/{r['channels']}   direct {r['direct']}/{r['channels']}   CamillaDSP -> USB {r['to_usb']}/8")
+    if m["verdict"] == "usb-missing":
         print("=> USB interface not connected (or named differently, see THEATER_USB): nothing can be routed to the rig;")
         print("   audio plays on the default output device")
-        return
-    if v == len(mpv) and d == 0:
+    elif m["verdict"] == "cam":
         print("=> audio goes through CamillaDSP (EQ active)")
-    elif d == len(mpv) and v == 0:
+    elif m["verdict"] == "direct":
         print("=> audio goes direct to the USB interface (no EQ)")
     else:
         print("=> mixed or unfinished routing (the daemon will normally fix this within a second)")
+
+
+def status(as_json=False):
+    d = collect_status()
+    if as_json:
+        print(json.dumps(d, indent=1, sort_keys=True))
+    else:
+        render_status(d)
 
 
 def ensure():
@@ -702,7 +748,7 @@ def main():
     elif cmd == "toggle":
         set_mode("off" if read_mode() == "on" else "on")
     elif cmd == "status":
-        status()
+        status("--json" in args[1:])
     elif cmd == "ensure":
         ensure()
     elif cmd == "mode":

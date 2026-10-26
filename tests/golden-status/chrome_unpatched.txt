@@ -1,0 +1,7 @@
+EQ switch:     OFF   (file <STATE>/eq)
+Router daemon: active
+CamillaDSP:    active   [bass set drone2, bed alignment: yes, heights: bass to sub + tone-match]
+Profile:       film   (mode auto; flavours: stereo balanced, bed balanced)
+Adaptive engine: on, service active, ports down
+Google Chrome: playing, 0/2 channels patched into CamillaDSP  (not patched: profile is not stereo, EQ is off or CamillaDSP is not ready)
+mpv:           not playing
