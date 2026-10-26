@@ -73,3 +73,24 @@ $EDITOR room.json                                               # change delays,
 [Apache License 2.0](LICENSE) (see also [NOTICE](NOTICE)). Dolby, Dolby Atmos, DTS and DTS:X are trademarks of their owners; this project is not affiliated with or endorsed by them. It contains no media files and no decoder code.
 
 Part of the [software-defined home theatre](https://github.com/praveenchandrahas/Software-Defined-Home-Theatre) project (documentation, measurements and the build log live there).
+
+## Status and control page (theater-ctld)
+
+`eq status --json` prints everything `eq status` knows as one JSON object (schema 1: `eq`, `dsp`, `apps`, `mpv`, `usb_up`); the text output is unchanged
+(`tests/test_status.py` holds golden copies for nine situations).
+
+`theater-ctld` is a small local server on `http://127.0.0.1:8765` (this computer only; there is no LAN option) with a dashboard page. Install it with
+`./scripts/install-ctld.sh` (run `./scripts/install-autoroute.sh` first); `remove` undoes it. If it stops, audio is not affected.
+
+- **Reads:** `eq status --json` (cached for about a second) plus CamillaDSP's websocket for load, buffer, clipped samples and peaks, and the number of
+  "buffer empty" lines in CamillaDSP's journal over the last minute. The websocket needs `-p 1234 -a 127.0.0.1` in the CamillaDSP unit, see the
+  runbook; without it the page says so and everything else still works. Only read-only websocket commands can be sent (enforced in code).
+- **Actions:** a fixed table: `eq on|off`, `eq mode auto|film|stereo|bed`, `eq flavour stereo|bed NAME`, `eq engine on|off`. Arguments are checked against
+  fixed lists and run without a shell. Setting what is already set does nothing. While something is playing, a profile change (about a second of silence)
+  and `eq off` (louder) need an explicit confirmation. One action runs at a time. Room corrections are not applied from here; that stays in autocal.
+- **Protection:** the page carries a random token (kept in `~/.local/state/theater/ctl-token`, mode 0600) that every action must send. Requests need a
+  `Host` of 127.0.0.1 or localhost (DNS rebinding) and a same-origin `Origin`; no CORS headers are sent, so another web page in your browser cannot read
+  or drive it. Every action is logged and shown as a desktop notification.
+- **Tests:** `tests/test_ctld.py` (fake `eq`, fake CamillaDSP websocket).
+- **Not done:** a LAN listener (for the phone), a bass-set control (the router forgets a hand-picked bass set at the next automatic switch), and
+  an object count (needs the Omniphony OSC schema).
