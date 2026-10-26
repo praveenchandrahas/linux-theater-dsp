@@ -1,6 +1,6 @@
-# theater-router
+# linux-theater-dsp
 
-The routing, DSP-profile and upmix layer of a Linux software-defined home theatre.
+**Stereo and 5.1 upmixer (to 5.1.2, with ceiling channels), PipeWire routing and a CamillaDSP room-correction profile generator** for a Linux software-defined home theatre. Written for one 5.1.2 rig (see "Adapting" below), but the upmixers (`scripts/upmix.py`, `scripts/upmix_engine.py`) are two small numpy-only files you can read and reuse on their own.
 
 - **`eq`** (the `theater-route` command) watches PipeWire and keeps the right audio paths linked into CamillaDSP, and switches the profile by what is playing
   (`eq status`, `eq ensure`, `eq prepare FILE`, `eq source`, `eq engine on|off`, `eq flavour ...`).
@@ -24,7 +24,7 @@ The routing, DSP-profile and upmix layer of a Linux software-defined home theatr
 Needs Python 3 with PyYAML, numpy and scipy, PipeWire (`pw-link`) and [CamillaDSP](https://github.com/HEnquist/camilladsp).
 
 ```bash
-git clone https://github.com/praveenchandrahas/theater-router && cd theater-router
+git clone https://github.com/praveenchandrahas/linux-theater-dsp && cd linux-theater-dsp
 tests/run.sh                    # 149 checks, no hardware
 ./scripts/make-default.sh       # writes and loads the standing profile, installs the router and `eq`, enables the services
 ```
