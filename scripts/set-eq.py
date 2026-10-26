@@ -37,6 +37,8 @@ Usage: ./set-eq.py [<scale> <max_freq_hz>] [--set=NAME] [--skip=a,b] [--dry]
                profile: run ./set-eq.py (no arguments) to go back to the standing profile.
 
   --dump-room  print the current room (ALIGN, height tone, base bass set) as room.json and exit. Writes nothing.
+  --no-room    ignore the live room file (~/.config/camilladsp/room.json, or $SETEQ_ROOM), which is otherwise read when it exists, so that
+               the values applied by autocal also survive the router's automatic profile switches.
   --room=FILE  override the room from a room.json (JSON only, strictly validated; missing keys keep the defaults built into
                this file). Its bass.base_set is used unless --set is given; bass.extra_filters (peaking cuts/boosts) are
                appended to the bass set on the same channels. A bad file exits with code 2 and changes nothing.
@@ -292,6 +294,7 @@ def height_blocks(hp, lfe_gain, tone, delay=0.0, invert=False):
 ROOM_CH = {"FL": 0, "FR": 1, "RL": 2, "RR": 3, "FC": 4, "LFE": 5, "SL": 6, "SR": 7}   # name -> hardware index
 ROOM_ORDER = ["FL", "FR", "FC", "LFE", "SL", "SR", "RL", "RR"]                       # order used in room.json
 DEFAULT_BASE_SET = "drone2"
+LIVE_ROOM = "~/.config/camilladsp/room.json"      # read implicitly when it exists; autocal apply writes it
 ROOM_MAX_BYTES = 1 << 20
 ROOM_TONE_TYPES = ("Peaking", "Highshelf", "Lowshelf")
 ROOM_RANGES = {"delay_ms": (0.0, 20.0), "trim_db": (-20.0, 6.0), "freq": (20.0, 20000.0), "gain": (-24.0, 6.0), "q": (0.3, 12.0)}
@@ -508,13 +511,21 @@ def main():
     if "--room" in sys.argv[1:] or _opt("--room") == "":
         print("--room needs a file: --room=FILE", file=sys.stderr)
         sys.exit(2)
-    if _opt("--room") is not None:
+    room_path = _opt("--room")
+    live_room = False
+    if room_path is None and "--no-room" not in sys.argv[1:]:       # the live room (written by autocal's apply) is the standing room unless told otherwise
+        live = os.path.expanduser(os.environ.get("SETEQ_ROOM", LIVE_ROOM))
+        if os.path.isfile(live):
+            room_path, live_room = live, True
+    if room_path is not None:
         try:
-            room = load_room(_opt("--room"))
+            room = load_room(room_path)
         except RoomError as e:
             print(f"Invalid room file, nothing changed: {e}", file=sys.stderr)
             sys.exit(2)
         apply_room(room)
+        if live_room and "--dump-room" not in sys.argv[1:]:
+            print(f"Room file in use: {room_path} (the live room; --no-room ignores it)")
     if "--dump-room" in sys.argv[1:]:
         b = room.get("bass", {})
         print(json.dumps(room_dump(b.get("base_set", DEFAULT_BASE_SET), [dict(name=n, freq=f, gain=g, q=q) for n, f, g, q in b.get("extra_filters", [])]), indent=2))
@@ -523,7 +534,7 @@ def main():
         print("--write-config cannot be combined with --upmix (the upmix stage writes decorrelator files).", file=sys.stderr)
         sys.exit(2)
     # No arguments (or --default) = the standing profile: drone2 bass set, measured alignment, heights bass-managed and tone-matched.
-    if all(a in ("--dry", "--default") or a.startswith(("--rattle", "--upmix", "--room=", "--write-config=")) for a in sys.argv[1:]):
+    if all(a in ("--dry", "--default") or a == "--no-room" or a.startswith(("--rattle", "--upmix", "--room=", "--write-config=")) for a in sys.argv[1:]):
         sys.argv = [sys.argv[0]] + DEFAULT_ARGS + [a for a in sys.argv[1:] if a != "--default"]
     args = [x for x in sys.argv[1:] if not x.startswith("--")]
     dry = "--dry" in sys.argv

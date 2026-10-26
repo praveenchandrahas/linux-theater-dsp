@@ -315,5 +315,29 @@ with tempfile.TemporaryDirectory() as td:
                        capture_output=True, text=True)
     check("failing `camilladsp -c`: exit 1 and no output file", r.returncode == 1 and not os.path.exists(os.path.join(sandbox, "o.yml")) and os.listdir(sandbox) == ["bin"])
 
+# the live room file (written by autocal apply) is read implicitly, so it survives the router's automatic profile switches
+with tempfile.TemporaryDirectory() as td:
+    live = os.path.join(td, "home", ".config", "camilladsp", "room.json")
+    os.makedirs(os.path.dirname(live))
+    base = json.loads(cli(["--dump-room"], td).stdout)
+    mod = json.loads(json.dumps(base))
+    mod["align"]["SL"]["delay_ms"] = 1.5
+    mod["bass"]["extra_filters"] = [{"name": "ac_1", "freq": 55.0, "gain": -4.0, "q": 4.0}]
+    json.dump(mod, open(live, "w"))
+    out, out2 = os.path.join(td, "live.yml"), os.path.join(td, "nolive.yml")
+    r = cli(["--write-config=" + out], td)
+    check("live room: read implicitly and announced", r.returncode == 0 and "Room file in use" in r.stdout)
+    check("live room: its values reach the generated config (a router call without --room gets them)", open(out).read() != gold("default.yml") and "ac_1" in open(out).read())
+    r = cli(["--no-room", "--write-config=" + out2], td)
+    check("--no-room ignores the live room (default profile, byte-identical to the golden file)", r.returncode == 0 and open(out2).read() == gold("default.yml"))
+    check("--dump-room reports the live room", json.loads(cli(["--dump-room"], td).stdout) == mod)
+    basefile = os.path.join(td, "base.json")
+    json.dump(base, open(basefile, "w"))
+    check("live room: an explicit --room wins over it", json.loads(cli(["--room=" + basefile, "--dump-room"], td).stdout) == base)
+    open(live, "w").write('{"version": 1, "align": {"XX": {}}}')
+    r = cli(["--write-config=" + os.path.join(td, "bad.yml")], td)
+    check("invalid live room: refused with exit 2 and nothing written (never silently falls back)", r.returncode == 2 and not os.path.exists(os.path.join(td, "bad.yml")))
+    check("invalid live room: --no-room still works", cli(["--no-room", "--write-config=" + os.path.join(td, "ok.yml")], td).returncode == 0)
+
 print("\nALL PASS" if ok else "\nSOME FAILED")
 sys.exit(0 if ok else 1)
