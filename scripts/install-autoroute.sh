@@ -64,7 +64,9 @@ WantedBy=default.target
 UNITEOF
 
 systemctl --user daemon-reload
-systemctl --user enable --now "$UNIT" || { echo "Could not enable $UNIT"; exit 1; }
+systemctl --user enable "$UNIT" || { echo "Could not enable $UNIT"; exit 1; }
+# restart (not just start): "enable --now" leaves an already running router on the OLD code after an update
+systemctl --user restart "$UNIT" || { echo "Could not start $UNIT"; exit 1; }
 
 echo
 echo "== Start at boot =="
