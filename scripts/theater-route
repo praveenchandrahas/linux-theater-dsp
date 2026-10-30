@@ -129,7 +129,7 @@ def apply(mode, out=None, profile="film"):
                  and all(g.has(cam_out(i), f"{USB}:playback_{p}") for i, p in enumerate(PORTS)))
     parts = route_apps(g, apps, mode == "on" and dsp_ready and profile.startswith("stereo")) if apps else []
     if profile.startswith("stereo-ad") or any(p.startswith("theater-upmix") for p in out | inn):
-        eng = route_engine(g, out, inn, [f"{n}" for n in apps] + (["mpv"] if mpv and set(mpv) <= {"FL", "FR"} else []),
+        eng = route_engine(g, out, inn, [f"{n}" for n in apps] + (["mpv"] if {"FL", "FR"} <= set(mpv) else []),
                            mode == "on" and dsp_ready and profile.startswith("stereo-ad"))
         if eng:
             parts.append(eng)
@@ -560,7 +560,8 @@ def collect_status():
     g = Graph()
     up = all(p in inn for p in ENGINE_IN) and all(p in out for p in ENGINE_OUT)
     d["dsp"]["engine"] = {"state": engine_state(), "service": service_state(ENGINE_UNIT), "ports_up": up,
-                          "linked": bool(up and all(g.has(ENGINE_OUT[i], cam_in(ENGINE_TO_CAM[i])) for i in range(4)))}
+                          "linked": bool(up and all(g.has(ENGINE_OUT[i], cam_in(ENGINE_TO_CAM[i])) for i in range(4))),
+                          "input_from": sorted({a.rpartition(":")[0] for a, b in g.links if b in ENGINE_IN})}
     for name, ports in sorted(stereo_apps(out).items()):
         n = sum(g.has(f"{name}:output_{p}", cam_in(i)) for p in ports for i in ((0, 1) if p == "MONO" else (0,) if p == "FL" else (1,)))
         total = sum(2 if p == "MONO" else 1 for p in ports)
@@ -603,6 +604,8 @@ def render_status(d):
     en = dsp["engine"]
     print(f"Adaptive engine: {en['state']}, service {en['service']}, ports {'up' if en['ports_up'] else 'down'}"
           + (", linked into CamillaDSP" if en["linked"] else ""))
+    if en["linked"] and not en.get("input_from") and (d["apps"] or d["mpv"]["playing"]):
+        print("  WARNING: the engine is running but nothing plays into it; the surrounds and heights stay silent")
     for a in d["apps"]:
         print(f"{a['name']}: playing, {a['patched']}/{a['total']} channels patched into CamillaDSP"
               + ("" if a["patched"] else "  (not patched: profile is not stereo, EQ is off or CamillaDSP is not ready)"))

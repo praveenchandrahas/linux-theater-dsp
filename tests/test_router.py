@@ -261,6 +261,19 @@ s2 = load(); s2["in"] = [x for x in s2["in"] if not x.startswith("theater-upmix"
 check("stereo-ad but engine ports missing: reported, Chrome still reaches the fronts", ("adaptive engine not running" in T.apply("on", profile="stereo-ad:balanced"),
       sorted(b for _, b in chrome_links() if "camilla" in b)), (True, ["camilladsp-capture:input_1", "camilladsp-capture:input_2"]))
 
+# mpv with its usual 8 output ports (the wrapper asks for 7.1) playing a 2-channel file must still feed the engine (found at the rig, 2026-10-30:
+# the engine ran, but nothing was linked to it, so the surrounds and heights stayed silent)
+st = {"out": [], "in": [f"{U}:playback_{p}" for p in P], "links": []}
+cam_up(st); engine_up(st); mpv_up(st, P); save(st)
+T.apply("on", profile="stereo-ad:balanced")
+check("stereo-ad: 8-port mpv FL/FR -> engine in (and only FL/FR)",
+      sorted(l for l in eng_links() if l[1].startswith("theater-upmix-in")),
+      [("mpv:output_FL", "theater-upmix-in:input_FL"), ("mpv:output_FR", "theater-upmix-in:input_FR")])
+check("stereo-ad: 8-port mpv still reaches all 8 CamillaDSP inputs", counts()[1], 8)
+T.apply("on", profile="film")
+check("film profile: 8-port mpv no longer feeds the engine", eng_links(), [])
+mpv_down(load()); st = load(); mpv_down(st); save(st)
+
 # lifecycle
 cfg_w = lambda prof: open(cfg, "w").write(f"# theater-profile: {prof}\ndevices:\n")
 sw = T.Switcher(); cfg_w("stereo-ad:balanced"); svc["state"] = "inactive"; calls_svc.clear()
