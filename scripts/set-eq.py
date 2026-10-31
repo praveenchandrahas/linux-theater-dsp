@@ -64,6 +64,7 @@ Channels filtered (hardware order FL FR RL RR FC LFE SL SR): 0,1,4,5,6,7. Height
 import cmath, json, math, os, re, shutil, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import layout as LAY
 import upmix as UPMIX
 
 FS = 48000
@@ -184,24 +185,26 @@ FILTER_SETS = {
 FILTER_SETS["drone1"] = FILTER_SETS["punch20x"] + [("d1_1", 72.0, -4.0, 10.0), ("d1_2", 84.0, -4.0, 4.0)]
 FILTER_SETS["drone2"] = FILTER_SETS["punch20x"] + [("d2_1", 72.0, -6.0, 8.0), ("d2_2", 84.0, -6.0, 4.0)]
 FILTER_SETS["drone3"] = FILTER_SETS["punch20x"] + [("d3_1", 72.0, -8.0, 6.0), ("d3_2", 88.0, -8.0, 4.0)]
+FILTER_SETS["flat"] = []        # no bass filters: the starting point for a layout that is not the author's
 CHANNELS = [0, 1, 4, 5, 6, 7]
 
-HEAD = """devices:
+HEAD_TEMPLATE = """devices:
   samplerate: 48000
   chunksize: 1024
 
   capture:
     type: PipeWire
-    channels: 8
+    channels: {n}
     node_name: camilladsp-capture
     node_description: CamillaDSP Capture
 
   playback:
     type: PipeWire
-    channels: 8
+    channels: {n}
     node_name: camilladsp-playback
     node_description: CamillaDSP Playback
 """
+HEAD = HEAD_TEMPLATE.format(n=8)        # the 8-channel header of the author's rig (kept for the tests that import it)
 
 
 def peaking_db(f, f0, gain, q):
@@ -252,38 +255,62 @@ HEIGHT_TONE_TRIM_DB = 1.0     # sweep1 predicted +3.4 dB, but sweep2 (measured w
 # Narrow features that differ between RL and RR (ceiling reflections, comb filtering) are deliberately left alone.
 
 
-HEIGHT_CH = (2, 3)
-HEIGHT_BUS = 8       # internal 9th channel: the sum of the two heights, low-passed, then added to the LFE
+# The author's numbers by channel NAME, kept apart so that a layout that is not the author's can start neutral (see configure()).
+_AUTHOR = {"align": {v[0].split()[0]: (v[1], v[2]) for v in ALIGN.values()}, "labels": {v[0].split()[0]: v[0] for v in ALIGN.values()},
+           "tone": [(n, dict(p)) for n, p in HEIGHT_TONE], "trim": HEIGHT_TONE_TRIM_DB}
+
+HEIGHT_CH = (2, 3)       # ports of the height speakers (set by configure())
+BASS_SUB_CH = (2, 3)     # ports whose bass Roomtone sends to the sub (bass: sub)
+SUB_PORT = 5             # port of the sub (LFE)
+HEIGHT_BUS = 8       # internal extra channel (index = channel count): the sum of the bass-to-sub speakers, low-passed, then added to the LFE
+N = 8                # CamillaDSP channel count = output ports of the interface
+LAYOUT = None
+
+
+def tone_active(tone):
+    """Tone-match is wanted and there is something to do: the author's room always has; a neutral room only once a room.json brought filters or a trim."""
+    return bool(tone) and (LAYOUT is None or LAYOUT.room_defaults == "author" or bool(HEIGHT_TONE) or HEIGHT_TONE_TRIM_DB != 0)
 
 
 def height_blocks(hp, lfe_gain, tone, delay=0.0, invert=False):
-    """Returns (filters_yaml, mixers_yaml, steps_yaml) for the heights-to-LFE bass management."""
+    """Returns (filters_yaml, mixers_yaml, steps_yaml) for the bass-to-sub management (speakers with bass: sub) and the tone-match of the height speakers.
+    On the author's layout this is the heights-to-LFE management it always was, byte for byte."""
+    tone = tone_active(tone)
+    bass_ch = list(BASS_SUB_CH) if SUB_PORT is not None else []
+    tone_ch = list(HEIGHT_CH) if tone else []
+    bus = HEIGHT_BUS
     f = ""
-    for ch in HEIGHT_CH:
+    for ch in bass_ch:
         f += f"  h_hp_{ch}:\n    type: BiquadCombo\n    parameters: {{type: LinkwitzRileyHighpass, freq: {hp}, order: 4}}\n"
-    f += f"  h_lp_bus:\n    type: BiquadCombo\n    parameters: {{type: LinkwitzRileyLowpass, freq: {hp}, order: 4}}\n"
-    if delay > 0:
-        f += f"  h_dly_bus:\n    type: Delay\n    parameters: {{delay: {delay}, unit: ms, subsample: false}}\n"
+    if bass_ch:
+        f += f"  h_lp_bus:\n    type: BiquadCombo\n    parameters: {{type: LinkwitzRileyLowpass, freq: {hp}, order: 4}}\n"
+        if delay > 0:
+            f += f"  h_dly_bus:\n    type: Delay\n    parameters: {{delay: {delay}, unit: ms, subsample: false}}\n"
     if tone:
         for n, p in HEIGHT_TONE:
             f += f"  {n}:\n    type: Biquad\n    parameters: {{{', '.join(f'{k}: {v}' for k, v in p.items())}}}\n"
         f += f"  ht_trim:\n    type: Gain\n    parameters: {{gain: {HEIGHT_TONE_TRIM_DB}, inverted: false, mute: false}}\n"
-    m = "  heights_in:\n    channels: {in: 8, out: 9}\n    mapping:\n"
-    for d in range(8):
-        m += f"      - dest: {d}\n        sources:\n          - {{channel: {d}, gain: 0.0}}\n"
-    m += f"      - dest: {HEIGHT_BUS}\n        sources:\n" + "".join(f"          - {{channel: {c}, gain: 0.0}}\n" for c in HEIGHT_CH)
-    m += "  heights_out:\n    channels: {in: 9, out: 8}\n    mapping:\n"
-    for d in range(8):
-        if d == 5:
-            m += f"      - dest: 5\n        sources:\n          - {{channel: 5, gain: 0.0}}\n          - {{channel: {HEIGHT_BUS}, gain: {lfe_gain}{', inverted: true' if invert else ''}}}\n"
-        else:
+    m = ""
+    if bass_ch:
+        m = f"  heights_in:\n    channels: {{in: {N}, out: {N + 1}}}\n    mapping:\n"
+        for d in range(N):
             m += f"      - dest: {d}\n        sources:\n          - {{channel: {d}, gain: 0.0}}\n"
-    st = "  - type: Mixer\n    name: heights_in\n"
-    st += f"  - type: Filter\n    channels: [{HEIGHT_BUS}]\n    names:\n      - h_lp_bus\n" + ("      - h_dly_bus\n" if delay > 0 else "")
-    for ch in HEIGHT_CH:
-        names = [f"h_hp_{ch}"] + ([n for n, _ in HEIGHT_TONE] + ["ht_trim"] if tone else [])
+        m += f"      - dest: {bus}\n        sources:\n" + "".join(f"          - {{channel: {c}, gain: 0.0}}\n" for c in bass_ch)
+        m += f"  heights_out:\n    channels: {{in: {N + 1}, out: {N}}}\n    mapping:\n"
+        for d in range(N):
+            if d == SUB_PORT:
+                m += f"      - dest: {SUB_PORT}\n        sources:\n          - {{channel: {SUB_PORT}, gain: 0.0}}\n          - {{channel: {bus}, gain: {lfe_gain}{', inverted: true' if invert else ''}}}\n"
+            else:
+                m += f"      - dest: {d}\n        sources:\n          - {{channel: {d}, gain: 0.0}}\n"
+    st = ""
+    if bass_ch:
+        st += "  - type: Mixer\n    name: heights_in\n"
+        st += f"  - type: Filter\n    channels: [{bus}]\n    names:\n      - h_lp_bus\n" + ("      - h_dly_bus\n" if delay > 0 else "")
+    for ch in sorted(set(bass_ch) | set(tone_ch)):
+        names = ([f"h_hp_{ch}"] if ch in bass_ch else []) + ([n for n, _ in HEIGHT_TONE] + ["ht_trim"] if ch in tone_ch else [])
         st += f"  - type: Filter\n    channels: [{ch}]\n    names:\n" + "".join(f"      - {n}\n" for n in names)
-    st += "  - type: Mixer\n    name: heights_out\n"
+    if bass_ch:
+        st += "  - type: Mixer\n    name: heights_out\n"
     return f, m, st
 
 
@@ -438,23 +465,56 @@ def apply_room(room):
         HEIGHT_TONE_TRIM_DB = ht["trim_db"]
 
 
-INVERT_CH = {"FL": 0, "FR": 1, "RL": 2, "RR": 3, "FC": 4, "LFE": 5, "SL": 6, "SR": 7}
+INVERT_CH = dict(ROOM_CH)
+
+
+def configure(layout):
+    """Point this module at a layout (layout.py). The default at import time is the author's 5.1.2; with it every generated config is byte-identical to the
+    one made before layouts existed. A layout that is not room_defaults: author starts with zero delays and trims, no ceiling tone filters and no bass filters
+    (set --set=NAME or a room.json to change that)."""
+    global LAYOUT, N, CHANNELS, ALIGN, HEIGHT_TONE, HEIGHT_TONE_TRIM_DB, HEIGHT_CH, BASS_SUB_CH, SUB_PORT, HEIGHT_BUS, ROOM_CH, ROOM_ORDER, INVERT_CH
+    global DEFAULT_BASE_SET, DEFAULT_ARGS, USB, PORTS
+    LAYOUT = layout
+    N = layout.n
+    ports = lambda names: tuple(sorted(layout.port(x) for x in names))
+    CHANNELS = list(ports(layout.bass_eq_channels))
+    HEIGHT_CH = ports(layout.heights)
+    BASS_SUB_CH = ports(layout.bass_to_sub)
+    SUB_PORT = layout.port(layout.sub) if layout.sub else None
+    HEIGHT_BUS = N
+    ROOM_CH = {c["name"]: c["port"] for c in layout.channels}
+    ROOM_ORDER = layout.result_order
+    INVERT_CH = dict(ROOM_CH)
+    author = layout.room_defaults == "author"
+    ALIGN = {}
+    for c in sorted(layout.channels, key=lambda c: c["port"]):
+        d, t = _AUTHOR["align"].get(c["name"], (0.0, 0.0)) if author else (0.0, 0.0)
+        ALIGN[c["port"]] = (_AUTHOR["labels"].get(c["name"], c["name"]) if author else c["name"], d, t)
+    HEIGHT_TONE = [(n, dict(p)) for n, p in _AUTHOR["tone"]] if author else []
+    HEIGHT_TONE_TRIM_DB = _AUTHOR["trim"] if author else 0.0
+    DEFAULT_BASE_SET = "drone2" if author else "flat"
+    DEFAULT_ARGS = [f"--set={DEFAULT_BASE_SET}", "--align", "--heights", "--heights-tone"]
+    USB = os.environ.get("THEATER_USB") or layout.device
+    PORTS = list(layout.port_names)
 
 
 RATTLE = [("rt_38", 38.0, -3.0, 2.5), ("rt_58", 58.0, -3.0, 3.0)]     # name, Hz, dB, Q (peaking cuts, scaled by --rattle=X)
 RATTLE_HP_HZ = 28.0                                                    # 2nd-order Butterworth high-pass on the Z906 inputs
 
 
-def build_config(chosen, align=None, invert=(), heights=None, rattle_hp=False, upmix=None, head=None):
-    """chosen: list of (name, freq, gain, q). upmix: (kind, flavour, ir_dir) or None. Returns the CamillaDSP YAML text."""
+def build_config(chosen, align=None, invert=(), heights=None, rattle_hp=False, upmix=None, head=None, layout=None):
+    """chosen: list of (name, freq, gain, q). upmix: (kind, flavour, ir_dir) or None. layout: a layout.py Layout (default: the one configure() set).
+    Returns the CamillaDSP YAML text."""
+    if layout is not None and layout is not LAYOUT:
+        configure(layout)
     label = "film" if not upmix else f"{upmix[0]}:{upmix[1] or UPMIX.DEFAULT_FLAVOUR[upmix[0]]}"
-    text = f"# theater-profile: {label}\n" + (head or HEAD) + "\nfilters:\n"
+    text = f"# theater-profile: {label}\n" + (head or HEAD_TEMPLATE.format(n=N)) + "\nfilters:\n"
     for n, f, g, q in chosen:
         text += f"  {n}:\n    type: Biquad\n    parameters: {{type: Peaking, freq: {f}, gain: {g}, q: {q}}}\n"
     steps = ""
     hmix = ""
     if upmix:                                   # the upmix stage runs first; everything below sees its 8-channel result
-        uf, um, us = UPMIX.blocks(*upmix)
+        uf, um, us = UPMIX.blocks(*upmix, layout=LAYOUT)
         text += uf
         hmix += um
         steps += us
@@ -475,7 +535,7 @@ def build_config(chosen, align=None, invert=(), heights=None, rattle_hp=False, u
         steps += f"  - type: Filter\n    channels: [{ch}]\n    names:\n      - inv_{ch}\n"
     if align:
         for ch, (label, delay, trim) in ALIGN.items():
-            if align == "bed" and ch in (2, 3):      # heights left exactly as they are
+            if align == "bed" and ch in HEIGHT_CH:      # heights left exactly as they are
                 continue
             names = []
             if delay > 0:
@@ -489,10 +549,12 @@ def build_config(chosen, align=None, invert=(), heights=None, rattle_hp=False, u
     if hmix:
         text += "\nmixers:\n" + hmix
     text += "\npipeline:\n" + steps if steps else "\npipeline: []\n"
+    if text.endswith("filters:\n") or "filters:\n\n" in text or "filters:\n\npipeline" in text:
+        text = text.replace("filters:\n", "filters: {}\n", 1)        # a layout with no filters at all (neutral room, flat set)
     return text
 
 
-DEFAULT_ARGS = [f"--set={DEFAULT_BASE_SET}", "--align", "--heights", "--heights-tone"]
+DEFAULT_ARGS = [f"--set={DEFAULT_BASE_SET}", "--align", "--heights", "--heights-tone"]     # (configure() rebuilds it for the layout)
 
 
 def _opt(name):
@@ -504,6 +566,17 @@ def _opt(name):
 
 def main():
     explicit_set = any(a.startswith("--set=") for a in sys.argv[1:])
+    if "--layout" in sys.argv[1:] or _opt("--layout") == "":
+        print("--layout needs a file: --layout=FILE", file=sys.stderr)
+        sys.exit(2)
+    try:
+        lay = LAY.load(_opt("--layout"), strict=_opt("--layout") is not None)
+    except LAY.LayoutError as e:
+        print(f"Invalid layout file, nothing changed: {e}", file=sys.stderr)
+        sys.exit(2)
+    configure(lay)
+    if not lay.source.startswith("built-in") and "--dump-room" not in sys.argv[1:]:
+        print(f"Layout in use: {lay.name} ({lay.source})")
     room, write_to = {}, _opt("--write-config")
     if "--write-config" in sys.argv[1:] or write_to == "":
         print("--write-config needs a path: --write-config=PATH", file=sys.stderr)
@@ -521,8 +594,12 @@ def main():
         try:
             room = load_room(room_path)
         except RoomError as e:
-            print(f"Invalid room file, nothing changed: {e}", file=sys.stderr)
-            sys.exit(2)
+            if live_room and not lay.is_author_512():          # a live room.json left over from another layout must not break a profile switch
+                print(f"Ignoring the live room file {room_path}: it does not fit the layout in use ({e}). Autocal's next apply writes a matching one.", file=sys.stderr)
+                room, room_path, live_room = {}, None, False
+            else:
+                print(f"Invalid room file, nothing changed: {e}", file=sys.stderr)
+                sys.exit(2)
         apply_room(room)
         if live_room and "--dump-room" not in sys.argv[1:]:
             print(f"Room file in use: {room_path} (the live room; --no-room ignores it)")
@@ -534,7 +611,7 @@ def main():
         print("--write-config cannot be combined with --upmix (the upmix stage writes decorrelator files).", file=sys.stderr)
         sys.exit(2)
     # No arguments (or --default) = the standing profile: drone2 bass set, measured alignment, heights bass-managed and tone-matched.
-    if all(a in ("--dry", "--default") or a == "--no-room" or a.startswith(("--rattle", "--upmix", "--room=", "--write-config=")) for a in sys.argv[1:]):
+    if all(a in ("--dry", "--default") or a == "--no-room" or a.startswith(("--rattle", "--upmix", "--room=", "--write-config=", "--layout=")) for a in sys.argv[1:]):
         sys.argv = [sys.argv[0]] + DEFAULT_ARGS + [a for a in sys.argv[1:] if a != "--default"]
     args = [x for x in sys.argv[1:] if not x.startswith("--")]
     dry = "--dry" in sys.argv
@@ -544,7 +621,7 @@ def main():
             invert = [v.strip().upper() for v in x.split("=", 1)[1].split(",") if v.strip()]
     heights = None
     if "--heights" in sys.argv:
-        heights = {"hp": 140, "lfe_gain": 0.0, "tone": "--heights-tone" in sys.argv}
+        heights = {"hp": lay.crossover_hz, "lfe_gain": 0.0, "tone": "--heights-tone" in sys.argv}
         for x in sys.argv[1:]:
             if x.startswith("--heights-hp="):
                 heights["hp"] = float(x.split("=", 1)[1])
@@ -595,6 +672,10 @@ def main():
             if kind not in UPMIX.KINDS:
                 print("--upmix needs stereo, stereo-ad or bed (optionally with :flavour), e.g. --upmix=stereo:balanced")
                 sys.exit(1)
+            fits, why = lay.upmix_support()
+            if not fits.get(kind):
+                print(f"No upmix is offered for the layout '{lay.name}': " + "; ".join(why) + ". Nothing changed.")
+                sys.exit(1)
             try:
                 UPMIX.describe(kind, flav or None)
                 (UPMIX.BED if kind == "bed" else UPMIX.STEREO)[flav or UPMIX.DEFAULT_FLAVOUR[kind]]
@@ -613,7 +694,7 @@ def main():
     if align:
         print(f"Time alignment and trims (--align{'=bed: heights untouched' if align == 'bed' else ''}):")
         for ch, (label, delay, trim) in ALIGN.items():
-            if align == "bed" and ch in (2, 3):
+            if align == "bed" and ch in HEIGHT_CH:
                 print(f"  channel {ch} {label:<10} untouched")
                 continue
             print(f"  channel {ch} {label:<10} delay {delay:5.2f} ms   trim {trim:+.1f} dB")
@@ -626,11 +707,11 @@ def main():
 
     bad = [n for n in invert if n not in INVERT_CH]
     if bad:
-        print("Unknown name(s) in --invert:", ", ".join(bad), "(use FL,FR,RL,RR,FC,LFE,SL,SR)")
+        print("Unknown name(s) in --invert:", ", ".join(bad), "(use " + ",".join(ROOM_ORDER) + ")")
         sys.exit(1)
     if invert:
         print("Polarity inverted on:", ", ".join(invert))
-    text = build_config(chosen, align, invert, heights, rattle_hp=rattle is not None, upmix=upmix)
+    text = build_config(chosen, align, invert, heights, rattle_hp=rattle is not None, upmix=upmix, layout=lay)
     if write_to is not None:
         write_config_only(text, write_to)
         return
@@ -685,8 +766,9 @@ def write_config_only(text, path):
     print(f"Wrote {path} ({note}). Nothing else was changed.")
 
 
-USB = "alsa_output.usb-0d8c_USB_Sound_Device-00.analog-surround-71"
-PORTS = ["FL", "FR", "RL", "RR", "FC", "LFE", "SL", "SR"]
+USB = ""
+PORTS = []
+configure(LAY.default_layout())     # the author's 5.1.2 until main() has read the layout file
 
 
 def pw(*a):
@@ -724,11 +806,11 @@ def reload_in_place():
     """SIGHUP the running CamillaDSP and check it came through untouched: same process, all 16 ports, and exactly the
     same links. Returns True only then; False means 'do the full restart instead' (nothing is lost by trying)."""
     pid = main_pid()
-    need = {f"camilladsp-playback:output_{n}" for n in range(1, 9)} | {f"camilladsp-capture:input_{n}" for n in range(1, 9)}
+    need = {f"camilladsp-playback:output_{n}" for n in range(1, N + 1)} | {f"camilladsp-capture:input_{n}" for n in range(1, N + 1)}
     if pid is None or not need <= (port_list("-o") | port_list("-i")):
         return False
     before = cam_links()
-    if sum(l[0].startswith("camilladsp-playback:") for l in before) < 8:
+    if sum(l[0].startswith("camilladsp-playback:") for l in before) < N:
         return False                                       # not running the way we expect; do the deterministic thing
     if subprocess.run(["systemctl", "--user", "kill", "--signal=HUP", "camilladsp.service"]).returncode != 0:
         return False
@@ -737,8 +819,8 @@ def reload_in_place():
 
 
 def wait_for_ports(timeout):
-    need_o = {f"camilladsp-playback:output_{n}" for n in range(1, 9)}
-    need_i = {f"camilladsp-capture:input_{n}" for n in range(1, 9)}
+    need_o = {f"camilladsp-playback:output_{n}" for n in range(1, N + 1)}
+    need_i = {f"camilladsp-capture:input_{n}" for n in range(1, N + 1)}
     end = time.time() + timeout
     while time.time() < end:
         if need_o <= port_list("-o") and need_i <= port_list("-i"):
@@ -767,7 +849,7 @@ def relink(was_via):
         pw(f"camilladsp-playback:output_{n}", f"{USB}:playback_{p}")
     links = current_links()
     outs = sum((f"camilladsp-playback:output_{n}", f"{USB}:playback_{p}") in links for n, p in enumerate(PORTS, 1))
-    print(f"CamillaDSP -> USB links: {outs}/8")
+    print(f"CamillaDSP -> USB links: {outs}/{N}")
     if not mpv_up:
         print("mpv is not running. Start a film, then run ./route-mpv.sh on.")
         return
@@ -778,15 +860,15 @@ def relink(was_via):
         pw(f"mpv:output_{p}", f"camilladsp-capture:input_{n}")
     links = current_links()
     via = sum((f"mpv:output_{p}", f"camilladsp-capture:input_{n}") in links for n, p in enumerate(PORTS, 1))
-    if outs == 8 and via == 8:
+    if outs == N and via == N:
         for p in PORTS:
             pw("-d", f"mpv:output_{p}", f"{USB}:playback_{p}")
-        print("mpv -> CamillaDSP -> USB restored (8/8 channels).")
+        print(f"mpv -> CamillaDSP -> USB restored ({N}/{N} channels).")
     else:
         for n, p in enumerate(PORTS, 1):
             pw("-d", f"mpv:output_{p}", f"camilladsp-capture:input_{n}")
         direct_route()
-        print(f"Could not rebuild the full path ({via}/8 in, {outs}/8 out). Fell back to a direct route (no EQ).")
+        print(f"Could not rebuild the full path ({via}/{N} in, {outs}/{N} out). Fell back to a direct route (no EQ).")
         print("Check: systemctl --user status camilladsp   and   ./route-mpv.sh status")
 
 

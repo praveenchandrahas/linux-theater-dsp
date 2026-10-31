@@ -29,6 +29,7 @@ if [ "$CHECK" = 0 ]; then
   [ -x "$BIN/theater-route" ] || "$HERE/install-autoroute.sh" || { say "install-autoroute.sh failed"; exit 1; }
   # keep the installed router and eq command in step with this checkout (adds `eq ensure`)
   install -m 755 "$HERE/theater-route" "$BIN/theater-route"
+  install -m 755 "$HERE/layout.py" "$BIN/layout.py"      # the router reads the speaker layout through it (docs/layouts.md)
   systemctl --user daemon-reload
   systemctl --user enable camilladsp.service theater-router.service 2>&1 | sed 's/^/  /'
   systemctl --user start camilladsp.service theater-router.service 2>&1 | sed 's/^/  /'

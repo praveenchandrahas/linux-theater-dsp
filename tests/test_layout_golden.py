@@ -60,8 +60,7 @@ compare("cfg-plain.yml", S.build_config(drone2))
 # ---- router: the complete link set after each situation, with the default (author's) layout
 os.environ.update(FAKE_PW_STATE=os.path.join(tempfile.mkdtemp(), "s.json"), THEATER_PW_LINK=f"{HERE}/fake-pw-link",
                   THEATER_STATE_DIR=os.path.join(tempfile.mkdtemp(), "state"))
-os.environ.pop("THEATER_LAYOUT", None)
-os.environ["THEATER_LAYOUT_FILE"] = "/nonexistent/layout.yml"      # no layout file: the built-in 5.1.2 layout, exactly as before
+os.environ["ROOMTONE_LAYOUT"] = "/nonexistent/layout.yml"      # no layout file: the built-in 5.1.2 layout, exactly as before
 loader = importlib.machinery.SourceFileLoader("tr_gold", os.path.join(HERE, "..", "scripts", "theater-route"))
 T = importlib.util.module_from_spec(importlib.util.spec_from_loader("tr_gold", loader))
 loader.exec_module(T)

@@ -25,8 +25,18 @@ State: ~/.local/state/theater/eq  (contains "on" or "off"; no file = on).
 """
 import json, os, re, shutil, socket, subprocess, sys, time
 
-USB = os.environ.get("THEATER_USB", "alsa_output.usb-0d8c_USB_Sound_Device-00.analog-surround-71")
-PORTS = ["FL", "FR", "RL", "RR", "FC", "LFE", "SL", "SR"]          # hardware order = CamillaDSP channel 1..8
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import layout as LAY
+try:
+    LAYOUT, LAYOUT_ERROR = LAY.load(), None
+except LAY.LayoutError as _e:             # a broken layout file must not take the sound down: keep the built-in layout and say so in `eq status`
+    LAYOUT, LAYOUT_ERROR = LAY.default_layout(), str(_e)
+UPMIX_FITS, UPMIX_WHY = LAYOUT.upmix_support()
+UPMIX_OK = bool(UPMIX_FITS["stereo"])
+USB = os.environ.get("THEATER_USB") or LAYOUT.device
+PORTS = list(LAYOUT.port_names)          # PipeWire port suffixes in hardware order = CamillaDSP channel 1..N (the author's: FL FR RL RR FC LFE SL SR)
+N = LAYOUT.n
+FL_IN, FR_IN = (LAYOUT.port("FL"), LAYOUT.port("FR")) if "FL" in LAYOUT.by_name and "FR" in LAYOUT.by_name else (0, 1)   # CamillaDSP inputs a stereo app is patched into
 PW_LINK = os.environ.get("THEATER_PW_LINK", "pw-link")
 STATE_DIR = os.path.expanduser(os.environ.get("THEATER_STATE_DIR", "~/.local/state/theater"))
 STATE = os.path.join(STATE_DIR, "eq")
@@ -45,7 +55,8 @@ ENGINE_UNIT = os.environ.get("THEATER_ENGINE_UNIT", "theater-upmix.service")
 ENGINE_GRACE = float(os.environ.get("THEATER_ENGINE_GRACE", "12"))  # s the adaptive engine gets to show up before falling back to the fixed upmix
 ENGINE_IN = [f"theater-upmix-in:input_{p}" for p in ("FL", "FR")]
 ENGINE_OUT = [f"theater-upmix-out:output_AUX{i}" for i in range(4)]    # ambience L, R, ceiling feeds -> CamillaDSP inputs SL, SR, TL, TR
-ENGINE_TO_CAM = [6, 7, 2, 3]
+_slots = LAYOUT.upmix_slots() if UPMIX_OK else {"SL": 6, "SR": 7, "TL": 2, "TR": 3}
+ENGINE_TO_CAM = [_slots["SL"], _slots["SR"], _slots["TL"], _slots["TR"]]      # engine outputs -> CamillaDSP inputs SL, SR, TL, TR (ports of this layout)
 KEEP = object()                                                       # "no decision yet, leave the profile as it is"
 
 
@@ -116,8 +127,8 @@ def apply(mode, out=None, profile="film"):
         return None
     mpv = [p for p in PORTS if f"mpv:output_{p}" in out]
     apps = stereo_apps(out)
-    cam_out_up = all(cam_out(i) in out for i in range(8))
-    cam_in_up = all(cam_in(i) in inn for i in range(8))
+    cam_out_up = all(cam_out(i) in out for i in range(N))
+    cam_in_up = all(cam_in(i) in inn for i in range(N))
     usb_up = all(f"{USB}:playback_{p}" in inn for p in PORTS)
 
     g = Graph()
@@ -201,7 +212,7 @@ def route_apps(g, apps, via_dsp):
     """Patch each stereo app into CamillaDSP FL/FR (make before break), or leave it alone / hand it back when not wanted."""
     msgs = []
     for name, ports in sorted(apps.items()):
-        want = [(f"{name}:output_{p}", cam_in(i)) for p in ports for i in ((0, 1) if p == "MONO" else (0,) if p == "FL" else (1,))]
+        want = [(f"{name}:output_{p}", cam_in(i)) for p in ports for i in ((FL_IN, FR_IN) if p == "MONO" else (FL_IN,) if p == "FL" else (FR_IN,))]
         srcs = {f"{name}:output_{p}" for p in ports}
         if via_dsp:
             added = [(a, b) for a, b in want if not g.has(a, b)]
@@ -361,7 +372,15 @@ def mpv_source():
 
 
 def want_profile(pmode, mpv_on, src, apps_on, flav, engine=False):
-    """The profile that fits what is playing: a name, None (nothing playing) or KEEP (mpv is up but not identified yet)."""
+    """The profile that fits what is playing: a name, None (nothing playing) or KEEP (mpv is up but not identified yet).
+    A layout the upmixers do not fit (docs/layouts.md) always gets the film profile: no upmix is attempted."""
+    r = _want_profile(pmode, mpv_on, src, apps_on, flav, engine)
+    if not UPMIX_OK and isinstance(r, str) and r.startswith(("stereo", "bed")):
+        return with_flavour("film", flav, engine)
+    return r
+
+
+def _want_profile(pmode, mpv_on, src, apps_on, flav, engine=False):
     if pmode != "auto":
         return with_flavour(pmode, flav, engine)
     if mpv_on:
@@ -545,6 +564,15 @@ def config_summary():
     return ", ".join(parts)
 
 
+def layout_info():
+    """The active layout for the status page and the mpv overlay (plan view, meters). Additive: schema 1 readers ignore the key."""
+    return {"name": LAYOUT.name, "source": LAYOUT.source, "error": LAYOUT_ERROR, "ports": LAYOUT.n, "device": USB,
+            "amp_bass_management": LAYOUT.amp_bass_management,
+            "channels": [{"name": c["name"], "role": c["role"], "port": c["port"], "port_name": LAYOUT.port_names[c["port"]],
+                          "azimuth": c["azimuth"], "elevation": c["elevation"], "bass": c["bass"]} for c in LAYOUT.channels],
+            "upmix": {"fits": UPMIX_OK, "why": UPMIX_WHY}}
+
+
 def collect_status():
     """Everything `eq status` knows, as one dict (schema 1). `eq status --json` prints it; status() renders it as text."""
     d = {"schema": 1, "time": int(time.time()),
@@ -552,7 +580,8 @@ def collect_status():
                 "camilla": service_state("camilladsp.service"), "camilla_summary": config_summary()},
          "dsp": {"profile": current_profile(), "pmode": read_pmode(), "flavours": read_flavours()},
          "pipewire": True, "apps": [], "usb_up": None,
-         "mpv": {"playing": False, "channels": [], "source": None, "route": None, "verdict": None}}
+         "mpv": {"playing": False, "channels": [], "source": None, "route": None, "verdict": None},
+         "layout": layout_info()}
     out, inn = port_set("-o"), port_set("-i")
     if out is None or inn is None:
         d["pipewire"] = False
@@ -563,7 +592,7 @@ def collect_status():
                           "linked": bool(up and all(g.has(ENGINE_OUT[i], cam_in(ENGINE_TO_CAM[i])) for i in range(4))),
                           "input_from": sorted({a.rpartition(":")[0] for a, b in g.links if b in ENGINE_IN})}
     for name, ports in sorted(stereo_apps(out).items()):
-        n = sum(g.has(f"{name}:output_{p}", cam_in(i)) for p in ports for i in ((0, 1) if p == "MONO" else (0,) if p == "FL" else (1,)))
+        n = sum(g.has(f"{name}:output_{p}", cam_in(i)) for p in ports for i in ((FL_IN, FR_IN) if p == "MONO" else (FL_IN,) if p == "FL" else (FR_IN,)))
         total = sum(2 if p == "MONO" else 1 for p in ports)
         d["apps"].append({"name": name, "patched": n, "total": total})
     mpv = [p for p in PORTS if f"mpv:output_{p}" in out]
@@ -618,7 +647,7 @@ def render_status(d):
                                "not identified (mpv IPC socket missing or no audio track yet; see 'eq source')"))
     r = m["route"]
     print(f"mpv:           {len(m['channels'])} channels ({' '.join(m['channels'])})")
-    print(f"Route:         via CamillaDSP {r['via']}/{r['channels']}   direct {r['direct']}/{r['channels']}   CamillaDSP -> USB {r['to_usb']}/8")
+    print(f"Route:         via CamillaDSP {r['via']}/{r['channels']}   direct {r['direct']}/{r['channels']}   CamillaDSP -> USB {r['to_usb']}/{N}")
     if m["verdict"] == "usb-missing":
         print("=> USB interface not connected (or named differently, see THEATER_USB): nothing can be routed to the rig;")
         print("   audio plays on the default output device")
@@ -684,6 +713,8 @@ def cmd_mode(args):
         return
     if args[0] not in PMODES:
         print("usage: eq mode auto|film|stereo|bed"), sys.exit(1)
+    if args[0] in ("stereo", "bed") and not UPMIX_OK:
+        print(f"No upmix is offered for the layout '{LAYOUT.name}': " + "; ".join(UPMIX_WHY) + ". Mode unchanged."), sys.exit(1)
     write_state("profile-mode", args[0])
     print(f"Mode {args[0]}." + (" Picks the profile from what is playing." if args[0] == "auto" else " Fixed until you set auto."))
     apply_now()

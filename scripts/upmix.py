@@ -20,6 +20,8 @@ The levels are therefore deliberately conservative, in three flavours per job, s
 import os
 import numpy as np
 
+import layout as LAY
+
 FS = 48000
 IR_TAPS = 2048
 
@@ -107,6 +109,14 @@ def _mixer(name, nin, nout, mapping):
     return y
 
 
+def _map(X, n, slot_mapping):
+    """Slot-numbered mapping ({dest slot: [(src slot, coefficient)]}) -> port-numbered mapping for an n-port CamillaDSP. Ports outside the eight slots pass through; slots not mentioned are silent, as before."""
+    out = {d: [(d, 1.0)] for d in range(n) if d not in X}
+    for d, srcs in slot_mapping.items():
+        out[X[d]] = [(X[s], c) for s, c in srcs]
+    return out
+
+
 def _filter(name, type_, **params):
     p = ", ".join(f"{k}: {v}" for k, v in params.items())
     return f"  {name}:\n    type: {type_}\n    parameters: {{{p}}}\n"
@@ -128,8 +138,20 @@ def _delay(name, ms):
     return _filter(name, "Delay", delay=ms, unit="ms", subsample="false")
 
 
-def blocks(kind, flavour, irdir):
-    """Returns (filters_yaml, mixers_yaml, steps_yaml) for the upmix stage, to be placed first in the pipeline."""
+SLOT_NAMES = ("FL", "FR", "TL", "TR", "FC", "LFE", "SL", "SR")     # the upmix is written in these logical slots (0..7); a layout maps them to output ports
+
+
+def blocks(kind, flavour, irdir, layout=None):
+    """Returns (filters_yaml, mixers_yaml, steps_yaml) for the upmix stage, to be placed first in the pipeline.
+    layout: a layout.py Layout that fits (Layout.upmix_support()); default the author's 5.1.2, where slot i is port i and the text is what it always was.
+    Ports that are not one of the eight slots (the rear pair of a 7.1.2) pass through untouched and stay silent for the sources the upmix serves."""
+    layout = layout or LAY.default_layout()
+    fits, why = layout.upmix_support()
+    if not fits.get(kind):
+        raise ValueError("this layout cannot take the upmix: " + "; ".join(why))
+    slots = layout.upmix_slots()
+    X = [slots[n] for n in SLOT_NAMES]
+    N = layout.n
     table = BED if kind == "bed" else STEREO
     if flavour is None:
         flavour = DEFAULT_FLAVOUR[kind]
@@ -145,25 +167,25 @@ def blocks(kind, flavour, irdir):
         hm = P["hm"]
         if kind == "stereo-ad":
             gsa, hga = lin(P["sur_db"] + AD_MAKEUP_DB), lin(P["h_db"] + AD_MAKEUP_DB)
-            m += _mixer("up_in", 8, 8, {
+            m += _mixer("up_in", N, N, _map(X, N, {
                 0: [(0, 1.0)], 1: [(1, 1.0)], 4: [(0, 0.5), (1, 0.5)],
-                6: [(6, gsa)], 7: [(7, gsa)],                          # engine feeds AUX0/AUX1 (ambience of L, R) arrive on inputs 7, 8
-                2: [(2, hga)], 3: [(3, hga)],                          # AUX2/AUX3 (ceiling feeds) arrive on inputs 3, 4
-            })
+                6: [(6, gsa)], 7: [(7, gsa)],                          # engine feeds AUX0/AUX1 (ambience of L, R) arrive on the SL, SR inputs
+                2: [(2, hga)], 3: [(3, hga)],                          # AUX2/AUX3 (ceiling feeds) arrive on the TL, TR inputs
+            }))
             P = dict(P, sur_d=AD_DELAYS[flavour][0], h_d=AD_DELAYS[flavour][1])
         else:
-            m += _mixer("up_in", 8, 8, {
+            m += _mixer("up_in", N, N, _map(X, N, {
                 0: [(0, 1.0)], 1: [(1, 1.0)],
                 2: [(0, hg / 2 * (1 + hm)), (1, hg / 2 * (-1 + hm))],      # TL source = hg*(S + hm*M)
                 3: [(0, hg / 2 * (-1 + hm)), (1, hg / 2 * (1 + hm))],      # TR source = hg*(-S + hm*M)
                 4: [(0, 0.5), (1, 0.5)],                                   # M
                 6: [(0, gs / 2), (1, -gs / 2)],                            # SL source = gs*S
                 7: [(0, -gs / 2), (1, gs / 2)],                            # SR source = -gs*S
-            })
-        m += _mixer("up_out", 8, 8, {
+            }))
+        m += _mixer("up_out", N, N, _map(X, N, {
             0: [(0, 1.0), (4, -c)], 1: [(1, 1.0), (4, -c)],
             2: [(2, 1.0)], 3: [(3, 1.0)], 4: [(4, cg)], 5: [], 6: [(6, 1.0)], 7: [(7, 1.0)],
-        })
+        }))
         f += _bw("up_hp_m", "Highpass", CENTRE_HP)
         f += _bw("up_s_hp", "Highpass", SUR_HP) + _bw("up_s_lp", "Lowpass", SUR_LP)
         f += _bw("up_h_hp", "Highpass", HEIGHT_HP)
@@ -171,11 +193,11 @@ def blocks(kind, flavour, irdir):
         f += _delay("up_dly_sl", P["sur_d"][0]) + _delay("up_dly_sr", P["sur_d"][1])
         f += _delay("up_dly_tl", P["h_d"][0]) + _delay("up_dly_tr", P["h_d"][1])
         s += "  - type: Mixer\n    name: up_in\n"
-        s += _step([4], ["up_hp_m"])
-        s += _step([6], ["up_s_hp", "up_s_lp", "up_dec_sl", "up_dly_sl"])
-        s += _step([7], ["up_s_hp", "up_s_lp", "up_dec_sr", "up_dly_sr"])
-        s += _step([2], ["up_h_hp", "up_dec_tl", "up_dly_tl"])
-        s += _step([3], ["up_h_hp", "up_dec_tr", "up_dly_tr"])
+        s += _step([X[4]], ["up_hp_m"])
+        s += _step([X[6]], ["up_s_hp", "up_s_lp", "up_dec_sl", "up_dly_sl"])
+        s += _step([X[7]], ["up_s_hp", "up_s_lp", "up_dec_sr", "up_dly_sr"])
+        s += _step([X[2]], ["up_h_hp", "up_dec_tl", "up_dly_tl"])
+        s += _step([X[3]], ["up_h_hp", "up_dec_tr", "up_dly_tr"])
         s += "  - type: Mixer\n    name: up_out\n"
     else:
         a = lin(P["h_db"])
@@ -183,13 +205,13 @@ def blocks(kind, flavour, irdir):
         keep = {0: [(0, 1.0)], 1: [(1, 1.0)], 4: [(4, 1.0)], 5: [(5, 1.0)], 6: [(6, 1.0)], 7: [(7, 1.0)]}
         keep[2] = [(6, a), (0, b), (1, -b)]          # TL source = a*SL + b*(L-R)
         keep[3] = [(7, a), (1, b), (0, -b)]          # TR source = a*SR + b*(R-L)
-        m += _mixer("up_in", 8, 8, keep)
+        m += _mixer("up_in", N, N, _map(X, N, keep))
         f += _bw("up_h_hp", "Highpass", HEIGHT_HP)
         f += _conv("up_dec_tl", ir["tl"]) + _conv("up_dec_tr", ir["tr"])
         f += _delay("up_dly_tl", P["h_d"][0]) + _delay("up_dly_tr", P["h_d"][1])
         s += "  - type: Mixer\n    name: up_in\n"
-        s += _step([2], ["up_h_hp", "up_dec_tl", "up_dly_tl"])
-        s += _step([3], ["up_h_hp", "up_dec_tr", "up_dly_tr"])
+        s += _step([X[2]], ["up_h_hp", "up_dec_tl", "up_dly_tl"])
+        s += _step([X[3]], ["up_h_hp", "up_dec_tr", "up_dly_tr"])
     return f, m, s
 
 
