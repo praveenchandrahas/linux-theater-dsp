@@ -1,0 +1,63 @@
+# theater-profile: film
+devices:
+  samplerate: 48000
+  chunksize: 1024
+
+  capture:
+    type: PipeWire
+    channels: 8
+    node_name: camilladsp-capture
+    node_description: CamillaDSP Capture
+
+  playback:
+    type: PipeWire
+    channels: 8
+    node_name: camilladsp-playback
+    node_description: CamillaDSP Playback
+
+filters:
+  q20_1:
+    type: Biquad
+    parameters: {type: Peaking, freq: 47.06, gain: -10.26, q: 5.0}
+  q20_2:
+    type: Biquad
+    parameters: {type: Peaking, freq: 60.66, gain: -2.51, q: 5.0}
+  q20_3:
+    type: Biquad
+    parameters: {type: Peaking, freq: 85.3, gain: -4.87, q: 5.0}
+  q20_4:
+    type: Biquad
+    parameters: {type: Peaking, freq: 107.09, gain: -4.06, q: 5.0}
+  q20_5:
+    type: Biquad
+    parameters: {type: Peaking, freq: 142.27, gain: -1.82, q: 5.0}
+  q20_6:
+    type: Biquad
+    parameters: {type: Peaking, freq: 154.88, gain: -5.44, q: 4.99}
+  q20_7:
+    type: Biquad
+    parameters: {type: Peaking, freq: 176.64, gain: -3.97, q: 5.0}
+  q20_8:
+    type: Biquad
+    parameters: {type: Peaking, freq: 250.37, gain: -5.01, q: 5.0}
+  d2_1:
+    type: Biquad
+    parameters: {type: Peaking, freq: 72.0, gain: -6.0, q: 8.0}
+  d2_2:
+    type: Biquad
+    parameters: {type: Peaking, freq: 84.0, gain: -6.0, q: 4.0}
+
+pipeline:
+  - type: Filter
+    channels: [0, 1, 4, 5, 6, 7]
+    names:
+      - q20_1
+      - q20_2
+      - q20_3
+      - q20_4
+      - q20_5
+      - q20_6
+      - q20_7
+      - q20_8
+      - d2_1
+      - d2_2

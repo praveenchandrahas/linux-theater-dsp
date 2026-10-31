@@ -6,4 +6,5 @@ python3 test_router.py
 python3 test_status.py
 python3 test_seteq.py
 python3 test_engine.py
+python3 test_layout_golden.py
 bash -n ../scripts/install-autoroute.sh ../scripts/route-mpv.sh ../scripts/make-default.sh && echo "PASS shell syntax"
