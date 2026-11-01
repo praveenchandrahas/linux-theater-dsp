@@ -142,6 +142,39 @@ mpv:output_FL
 f = L.parse_sink_ports(PWL)
 check("parse_sink_ports finds both sinks and ignores CamillaDSP/mpv", sorted((k, len(v)) for k, v in f.items()) ==
       [("alsa_output.pci-0000_00_1f.3.analog-stereo", 2), ("alsa_output.usb-0d8c_USB_Sound_Device-00.analog-surround-71", 8)])
+# pactl fallback (a fake pactl / pw-link on PATH-like paths; nothing real is run)
+PACTL = """Sink #51
+\tState: SUSPENDED
+\tName: alsa_output.usb-0d8c_USB_Sound_Device-00.analog-surround-71
+\tDescription: USB Sound Device Analog Surround 7.1
+\tChannel Map: front-left,front-right,rear-left,rear-right,front-center,lfe,side-left,side-right
+Sink #52
+\tName: alsa_output.pci-0000_00_1f.3.analog-stereo
+\tChannel Map: front-left,front-right
+Sink #53
+\tName: alsa_output.usb-big.multichannel
+\tChannel Map: front-left,front-right,rear-left,rear-right,front-center,lfe,side-left,side-right,aux8,aux9,aux10,aux11
+Sink #54
+\tName: camilladsp.monitor
+\tChannel Map: front-left,front-right
+"""
+pf = L.parse_pactl_sinks(PACTL)
+check("parse_pactl_sinks reads channel maps as port suffixes and skips CamillaDSP", pf == {
+    "alsa_output.usb-0d8c_USB_Sound_Device-00.analog-surround-71": ["FL", "FR", "RL", "RR", "FC", "LFE", "SL", "SR"],
+    "alsa_output.pci-0000_00_1f.3.analog-stereo": ["FL", "FR"],
+    "alsa_output.usb-big.multichannel": L.std_port_names(12)}, str(pf))
+import stat, tempfile
+_td = tempfile.mkdtemp()
+def _fake(name, body):
+    p_ = os.path.join(_td, name)
+    open(p_, "w").write("#!/bin/sh\n" + body); os.chmod(p_, 0o755)
+    return p_
+_pactl = _fake("pactl", "cat <<'EOT'\n" + PACTL + "EOT\n")
+_empty = _fake("pw-link-empty", "exit 0\n")
+_none = os.path.join(_td, "does-not-exist")
+dets = L.detect_interfaces(pw_link=_empty, pactl=_pactl)
+check("detect_interfaces falls back to pactl when pw-link lists nothing; widest sink first", [d for d, _ in dets][0] == "alsa_output.usb-big.multichannel" and len(dets) == 3, str(dets))
+check("detect_interfaces with neither tool installed returns an empty list", L.detect_interfaces(pw_link=_none, pactl=_none) == [])
 check("suggest_preset by port count (never the author's 5.1.2)", [L.suggest_preset(n) for n in (2, 4, 6, 8, 10, 12, 16)] == ["2.0", "2.0", "5.1", "7.1", "7.1.2", "7.1.4", "7.1.4"])
 d = L.propose("alsa_output.usb-x.analog-surround-71", f["alsa_output.usb-0d8c_USB_Sound_Device-00.analog-surround-71"])
 v = L.validate(d)
