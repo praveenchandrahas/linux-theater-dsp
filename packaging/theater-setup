@@ -1,0 +1,88 @@
+#!/bin/bash
+# theater-setup: turns the packaged linux-theater-dsp on or off for ONE user. The package itself never does this.
+#
+#   theater-setup [--dry-run] install     enable and start theater-router.service for this user
+#   theater-setup [--dry-run] uninstall   stop and disable theater-router.service and theater-upmix.service
+#   theater-setup check                   report only: services, shadowing copies in ~/.local/bin, CamillaDSP
+#
+# It does NOT touch CamillaDSP (its binary, unit or config.yml) or PipeWire/WirePlumber configuration. Use set-eq / make-default
+# yourself for the CamillaDSP profile, as before. --dry-run prints what would be done and changes nothing.
+set -u
+DRY=0
+ACTION=
+for a in "$@"; do
+  case "$a" in
+    --dry-run|-n) DRY=1 ;;
+    install|uninstall|check) ACTION=$a ;;
+    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown argument: $a (try --help)" >&2; exit 2 ;;
+  esac
+done
+[ -n "$ACTION" ] || { echo "usage: theater-setup [--dry-run] install|uninstall|check" >&2; exit 2; }
+if [ "$(id -u)" = 0 ] && [ "$DRY" = 0 ] && [ "$ACTION" != check ] && [ -z "${SDHT_ALLOW_ROOT:-}" ]; then
+  echo "Run theater-setup as your normal user, not as root: it sets up services for one user." >&2; exit 1
+fi
+UNIT=theater-router.service
+BIN=${HOME:-/nonexistent}/.local/bin
+UDIR=${XDG_CONFIG_HOME:-${HOME:-/nonexistent}/.config}/systemd/user
+
+run() { if [ "$DRY" = 1 ]; then echo "would run: $*"; else echo "+ $*"; "$@"; fi; }
+
+shadowing() {   # copies from the older hand installers that come first on PATH (or override the unit) and hide the packaged ones
+  local found=0 f
+  for f in eq theater-route set-eq.py upmix.py upmix_engine.py layout.py roomtone-layout; do
+    if [ -e "$BIN/$f" ]; then
+      echo "NOTE: $BIN/$f exists. It is a hand-installed copy; if $BIN is before /usr/bin on PATH it hides the packaged one."
+      found=1
+    fi
+  done
+  for f in theater-router.service theater-upmix.service; do
+    if [ -e "$UDIR/$f" ]; then
+      echo "NOTE: $UDIR/$f exists and overrides the packaged unit (user units in ~/.config win over /usr/lib/systemd/user)."
+      found=1
+    fi
+  done
+  [ "$found" = 0 ] && echo "no hand-installed copies found in $BIN or $UDIR"
+  [ "$found" = 1 ] && echo "      To use the packaged versions, remove those copies (linux-theater-dsp's install-autoroute.sh remove does it)."
+  return 0
+}
+
+have_systemd_user() { systemctl --user show-environment >/dev/null 2>&1; }
+
+camilla_note() {
+  if command -v camilladsp >/dev/null 2>&1; then echo "camilladsp: $(command -v camilladsp) ($(camilladsp --version 2>/dev/null | head -1))"
+  else echo "camilladsp: not found (not part of this package; the sdht install.sh can fetch the release)"; fi
+  if have_systemd_user; then
+    echo "camilladsp.service: $(systemctl --user is-enabled camilladsp.service 2>&1 | head -1) / $(systemctl --user is-active camilladsp.service 2>&1 | head -1)   (reported only, never changed here)"
+  fi
+}
+
+case "$ACTION" in
+  check)
+    echo "== linux-theater-dsp check =="
+    if have_systemd_user; then
+      echo "$UNIT: $(systemctl --user is-enabled "$UNIT" 2>&1 | head -1) / $(systemctl --user is-active "$UNIT" 2>&1 | head -1)"
+    else echo "no user systemd session here; services not checked"; fi
+    shadowing; camilla_note
+    command -v eq >/dev/null 2>&1 && echo "eq on PATH: $(command -v eq)" || echo "eq: not on PATH"
+    ;;
+  install)
+    shadowing
+    if [ "$DRY" = 0 ] && ! have_systemd_user; then echo "No user systemd session available; nothing was changed." >&2; exit 1; fi
+    run systemctl --user daemon-reload
+    run systemctl --user enable --now "$UNIT"
+    echo "theater-upmix.service is started by the router when the stereo profile needs it; it is not enabled at boot."
+    camilla_note
+    lg=$(loginctl show-user "${USER:-$(id -un)}" -p Linger --value 2>/dev/null)
+    echo "linger: ${lg:-unknown}   (only needed if this PC does not log in to the desktop by itself: loginctl enable-linger ${USER:-$(id -un)})"
+    if [ "$DRY" = 1 ]; then echo "(dry run: nothing was changed)"; fi
+    ;;
+  uninstall)
+    if [ "$DRY" = 0 ] && ! have_systemd_user; then echo "No user systemd session available; nothing was changed." >&2; exit 1; fi
+    run systemctl --user disable --now "$UNIT" theater-upmix.service
+    run systemctl --user daemon-reload
+    echo "Stopped. mpv stays on whatever route it has now; restart mpv to get direct sound. CamillaDSP was not touched."
+    echo "Your settings (~/.config/roomtone/layout.yml, ~/.local/state/theater) are left in place."
+    if [ "$DRY" = 1 ]; then echo "(dry run: nothing was changed)"; fi
+    ;;
+esac

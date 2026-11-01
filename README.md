@@ -1,5 +1,7 @@
 # linux-theater-dsp
 
+[![CI](https://github.com/praveenchandrahas/linux-theater-dsp/actions/workflows/ci.yml/badge.svg)](https://github.com/praveenchandrahas/linux-theater-dsp/actions/workflows/ci.yml) *(CI = unit tests, lint, and a package install/remove test in a clean Ubuntu 24.04 container. A green badge does not show the software works on a real rig.)*
+
 > **Part of the [Software Defined Home Theatre](https://github.com/praveenchandrahas/Software-Defined-Home-Theatre) project.** The main repository holds the documentation, build log, results and the installer checks; this is one of its parts. Sibling repositories: [mpv-object-audio](https://github.com/praveenchandrahas/mpv-object-audio) (player and Atmos wrapper) · [Roomtone](https://github.com/praveenchandrahas/Roomtone) (measurement, autocal, status page, mpv overlay) · [seekthumbs](https://github.com/praveenchandrahas/seekthumbs) (seek-bar thumbnails) · [mpv-shelf](https://github.com/praveenchandrahas/mpv-shelf) (film browser for mpv).
 
 **Stereo and 5.1 upmixer (to 5.1.2, with ceiling channels), PipeWire routing and a CamillaDSP room-correction profile generator** for a Linux software-defined home theatre. Written for one 5.1.2 rig (see "Adapting" below), but the upmixers (`scripts/upmix.py`, `scripts/upmix_engine.py`) are two small numpy-only files you can read and reuse on their own.
@@ -10,6 +12,22 @@
   `stereo` (2.0 to 5.1.2, fixed or adaptive).
 - **`upmix.py`** holds the fixed upmix presets as CamillaDSP mixer definitions; **`upmix_engine.py`** is the adaptive ambience engine (a PipeWire filter that steers the ambience and ceiling feeds by how
   correlated the stereo input is; about 4 % CPU and 21 ms by the author's measurement). The router starts and stops it while the adaptive stereo profile is active; without numpy and scipy it falls back to the fixed matrix.
+
+## Install (pre-release, experimental)
+
+Releases are marked **pre-release** on the [releases page](https://github.com/praveenchandrahas/linux-theater-dsp/releases). Download the `.deb` and `SHA256SUMS` from one release, check, then install:
+
+```sh
+sha256sum -c --ignore-missing SHA256SUMS
+sudo apt install ./linux-theater-dsp_0.1.0_all.deb
+theater-setup --dry-run   # then: theater-setup install
+```
+
+Needs PipeWire and Python 3; CamillaDSP itself is not packaged (the main repository's `install.sh` fetches the real release and checks its checksum).
+
+The package puts files under `/usr` only. Its install and remove scripts do not enable or start services, do not write into any home folder, and do not touch CamillaDSP or PipeWire configuration; the setup command above does the per-user part, and `--dry-run` shows what it would do first. Details, the other repositories' packages, and the one-command installer are in the main repository's [packaging notes](https://github.com/praveenchandrahas/Software-Defined-Home-Theatre/blob/main/docs/packaging.md).
+
+What was checked: written with an AI assistant; checked against simulated rooms and REW exports; used and checked by the author in his own room (one room, one author). No external or second-person validation yet. The packages are unsigned. CI installs and removes them in clean Ubuntu 24.04; the packaging itself has not been run on the author's own rig.
 
 ## How this differs from EasyEffects and other generic upmixers, and why this route
 
