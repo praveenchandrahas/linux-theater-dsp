@@ -74,6 +74,22 @@ $EDITOR room.json                                               # change delays,
 
 Part of the [software-defined home theatre](https://github.com/praveenchandrahas/Software-Defined-Home-Theatre) project (documentation, measurements and the build log live there).
 
+## Your layout
+
+The router, `set-eq.py` and the upmixers read one layout file (`~/.config/roomtone/layout.yml`, or `$ROOMTONE_LAYOUT`): which speakers exist, which interface port each is on, the sink name, and whether your amplifier does its own bass management. With no file the built-in layout is the author's 5.1.2, and the generated CamillaDSP configs, router links and upmix filters are byte-identical to before (golden tests in `tests/golden/layout/`).
+
+```
+scripts/layout.py --detect                          # what PipeWire shows, and the preset it would propose (plays nothing)
+scripts/layout.py --detect --device <sink> --write  # write that proposal
+scripts/layout.py --init 7.1                        # or a plain preset: 2.0 2.1 5.1 5.1.2 7.1 7.1.2 7.1.4
+scripts/layout.py --validate                        # say what is wrong with the file
+scripts/set-eq.py --layout=FILE --write-config=/tmp/x.yml   # build a config for any layout without touching anything
+```
+
+`install-autoroute.sh` installs the module and a `roomtone-layout` command. The stereo and 5.1 upmixes are offered only for layouts with FL FR FC LFE SL SR plus exactly two height speakers (5.1.2, 7.1.2); otherwise `eq` says why. Every preset except 5.1.2 starts with neutral room numbers (zero delays and trims, no tone filters, flat bass set) until you measure. The Roomtone repository has the Layout page (identify each speaker with a quiet tone, preview, save with backup) and the full reference: [docs/layouts.md](https://github.com/praveenchandrahas/Roomtone/blob/main/docs/layouts.md).
+
+**Tested how:** written with an AI assistant; checked against simulated rooms and REW exports; used and checked by the author in his own room (one room, one author). No external or second-person validation yet. Only the author's 5.1.2 has run on real hardware. Other layouts are tested by generating configs and router link sets and checking them (and `camilladsp -c` where it exists), not by listening.
+
 ## Status and control page
 
 `eq status --json` prints everything `eq status` knows as one JSON object (schema 1: `eq`, `dsp`, `apps`, `mpv`, `usb_up`); the text output is unchanged
