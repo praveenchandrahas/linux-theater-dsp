@@ -24,14 +24,17 @@ mkdir -p "$BIN" "$UNITDIR"
 if [ -e "$BIN/eq" ] && [ "$(readlink "$BIN/eq")" != "theater-route" ]; then
   echo "$BIN/eq already exists and is not ours. Remove or rename it, then re-run."; exit 1
 fi
-install -m 755 "$HERE/theater-route" "$BIN/theater-route"
-ln -sf theater-route "$BIN/eq"
-ln -sf layout.py "$BIN/roomtone-layout"          # `roomtone-layout --detect`, `--init 7.1`, `--validate` (docs/layouts.md)
-# The router switches CamillaDSP profiles by running set-eq.py, and the adaptive upmix engine runs from upmix_engine.py: keep them beside it.
+# Install layout.py (and the rest theater-route imports or shells out to) BEFORE theater-route itself: theater-route
+# does "import layout as LAY" at module load, and the running router (Restart=always, RestartSec=2) can be restarted by
+# systemd for any unrelated reason mid-install. If theater-route lands first, every restart in that window finds a
+# theater-route with no layout.py beside it yet and crash-loops on ModuleNotFoundError until this script catches up.
 for f in set-eq.py upmix.py upmix_engine.py layout.py; do
   [ -f "$HERE/$f" ] || { echo "$f must be in the same folder as this script."; exit 1; }
   install -m 755 "$HERE/$f" "$BIN/$f"
 done
+install -m 755 "$HERE/theater-route" "$BIN/theater-route"
+ln -sf theater-route "$BIN/eq"
+ln -sf layout.py "$BIN/roomtone-layout"          # `roomtone-layout --detect`, `--init 7.1`, `--validate` (docs/layouts.md)
 python3 -c "import numpy, scipy" 2>/dev/null || echo "NOTE: numpy and scipy are needed by upmix_engine.py (pip install --user numpy scipy, or your distro's python3-numpy python3-scipy). Without them the stereo upmix falls back to the fixed matrix."
 
 cat > "$UNITDIR/$UNIT" <<UNITEOF

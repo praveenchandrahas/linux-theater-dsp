@@ -19,8 +19,11 @@ PYDIRS=/usr/lib/linux-theater-dsp
 
 stage() {
   local L=/usr/lib/linux-theater-dsp
-  for f in theater-route set-eq.py upmix_engine.py route-mpv.sh; do inst 755 "scripts/$f" "$L/$f"; done
+  # Modules first: theater-route and set-eq.py both do "import layout" (set-eq.py also "import upmix") at module load, and on
+  # an upgrade the running theater-router.service (Restart=always) can be restarted mid-unpack for an unrelated reason. If
+  # theater-route landed first, that restart would crash-loop on ModuleNotFoundError until layout.py caught up.
   for f in upmix.py layout.py; do inst 644 "scripts/$f" "$L/$f"; done   # modules (no shebang); layout.py is started through roomtone-layout
+  for f in theater-route set-eq.py upmix_engine.py route-mpv.sh; do inst 755 "scripts/$f" "$L/$f"; done
   pyshebang "$L/theater-route" "$L/set-eq.py" "$L/upmix_engine.py"
   # `eq` decides what it is by its own name, so it is a symlink to theater-route (resolved to the real folder for its imports)
   link ../lib/linux-theater-dsp/theater-route /usr/bin/theater-route
