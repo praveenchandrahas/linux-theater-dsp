@@ -59,6 +59,23 @@ check("heights profile: height bass joins LFE (dest 5) from the bus channel 8",
       any(src["channel"] == 8 for m in h["mixers"]["heights_out"]["mapping"] if m["dest"] == 5 for src in m["sources"]))
 check("DEFAULT_ARGS is the standing profile", S.DEFAULT_ARGS == ["--set=drone2", "--align", "--heights", "--heights-tone"])
 
+# resolve_usb(): same renamed-node fallback as theater-route's, exercised here with port_list() faked (no real PipeWire).
+# Without this, relink()/direct_route() link straight to the configured USB name after a full CamillaDSP restart, which
+# silently does nothing once the interface has reconnected under a suffixed name (no USB serial number to match against)
+# -- the daemon's own next poll papers over it, but only after however long that takes.
+_orig_port_list = S.port_list
+try:
+    want = {f"playback_{p}" for p in S.PORTS}
+    S.port_list = lambda flag: ({f"{S.USB}:{p}" for p in want} if flag == "-i" else set())
+    check("resolve_usb: exact configured name present -> used as is", S.resolve_usb() == S.USB)
+    renamed = f"{S.USB}.2"
+    S.port_list = lambda flag: ({f"{renamed}:{p}" for p in want} if flag == "-i" else set())
+    check("resolve_usb: interface renamed by PipeWire -> the renamed node is found", S.resolve_usb() == renamed)
+    S.port_list = lambda flag: set()
+    check("resolve_usb: interface genuinely absent -> falls back to the configured name unchanged", S.resolve_usb() == S.USB)
+finally:
+    S.port_list = _orig_port_list
+
 # upmix presets (scripts/upmix.py)
 import tempfile
 import numpy as np

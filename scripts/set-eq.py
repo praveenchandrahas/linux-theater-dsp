@@ -790,6 +790,22 @@ def current_links():
     return out
 
 
+def resolve_usb():
+    """The USB interface's PipeWire node name, right now (same fallback as theater-route's resolve_usb: an interface
+    with no USB serial number can reconnect under a suffixed name, e.g. "...analog-surround-71.2"). Falls back to the
+    configured USB unchanged if nothing matches, same as before this existed."""
+    inn = port_list("-i")
+    if all(f"{USB}:playback_{p}" in inn for p in PORTS):
+        return USB
+    want = {f"playback_{p}" for p in PORTS}
+    candidates = sorted({node for node, _, suffix in (port.rpartition(":") for port in inn)
+                          if suffix in want and node != USB and node.startswith(USB)})
+    for node in candidates:
+        if all(f"{node}:playback_{p}" in inn for p in PORTS):
+            return node
+    return USB
+
+
 def main_pid():
     r = subprocess.run(["systemctl", "--user", "show", "-p", "MainPID", "--value", "camilladsp.service"],
                        capture_output=True, text=True)
@@ -831,8 +847,9 @@ def wait_for_ports(timeout):
 
 def direct_route():
     """mpv straight to the USB interface (no EQ). Used as a fallback so a problem never leaves you silent."""
+    usb = resolve_usb()
     for p in PORTS:
-        pw(f"mpv:output_{p}", f"{USB}:playback_{p}")
+        pw(f"mpv:output_{p}", f"{usb}:playback_{p}")
 
 
 def relink(was_via):
@@ -845,11 +862,12 @@ def relink(was_via):
             direct_route()
             print("Fell back to a direct route so you still have sound (no EQ).")
         return
+    usb = resolve_usb()         # re-resolved here: the interface may have reconnected under a renamed node since configure()
     for n, p in enumerate(PORTS, 1):
-        pw(f"camilladsp-playback:output_{n}", f"{USB}:playback_{p}")
+        pw(f"camilladsp-playback:output_{n}", f"{usb}:playback_{p}")
     links = current_links()
-    outs = sum((f"camilladsp-playback:output_{n}", f"{USB}:playback_{p}") in links for n, p in enumerate(PORTS, 1))
-    print(f"CamillaDSP -> USB links: {outs}/{N}")
+    outs = sum((f"camilladsp-playback:output_{n}", f"{usb}:playback_{p}") in links for n, p in enumerate(PORTS, 1))
+    print(f"CamillaDSP -> USB links: {outs}/{N}" + (f'  (found as "{usb}", not the configured name)' if usb != USB else ""))
     if not mpv_up:
         print("mpv is not running. Start a film, then run ./route-mpv.sh on.")
         return
@@ -862,7 +880,7 @@ def relink(was_via):
     via = sum((f"mpv:output_{p}", f"camilladsp-capture:input_{n}") in links for n, p in enumerate(PORTS, 1))
     if outs == N and via == N:
         for p in PORTS:
-            pw("-d", f"mpv:output_{p}", f"{USB}:playback_{p}")
+            pw("-d", f"mpv:output_{p}", f"{usb}:playback_{p}")
         print(f"mpv -> CamillaDSP -> USB restored ({N}/{N} channels).")
     else:
         for n, p in enumerate(PORTS, 1):
