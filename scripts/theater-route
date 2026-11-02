@@ -119,25 +119,45 @@ def cam_in(i):
     return f"camilladsp-capture:input_{i + 1}"
 
 
+def resolve_usb(inn):
+    """The USB interface's PipeWire node name, right now. Usually exactly USB. Our interface has no USB
+    serial number (confirmed: `lsusb -v` shows SerialNumber=0), so PipeWire cannot always tell a
+    reconnected instance is "the same" device and can register it under a suffixed name instead, such as
+    "...analog-surround-71.2". When the exact name is not fully up, look for the one other node that is
+    USB's name as a prefix and has every one of our ports; fall back to the configured name unchanged
+    (callers then see usb_up False, same as before) if nothing matches. Re-resolved on every call, so a
+    later reconnect (or plugging in a genuinely different interface) is picked up within one poll."""
+    if all(f"{USB}:playback_{p}" in inn for p in PORTS):
+        return USB
+    want = {f"playback_{p}" for p in PORTS}
+    candidates = sorted({node for node, _, suffix in (port.rpartition(":") for port in inn)
+                          if suffix in want and node != USB and node.startswith(USB)})
+    for node in candidates:
+        if all(f"{node}:playback_{p}" in inn for p in PORTS):
+            return node
+    return USB
+
+
 def apply(mode, out=None, profile="film"):
     """Bring the graph to the wanted state. Safe to call at any time, as often as you like."""
     out = out if out is not None else port_set("-o")
     inn = port_set("-i")
     if out is None or inn is None:
         return None
+    usb = resolve_usb(inn)
     mpv = [p for p in PORTS if f"mpv:output_{p}" in out]
     apps = stereo_apps(out)
     cam_out_up = all(cam_out(i) in out for i in range(N))
     cam_in_up = all(cam_in(i) in inn for i in range(N))
-    usb_up = all(f"{USB}:playback_{p}" in inn for p in PORTS)
+    usb_up = all(f"{usb}:playback_{p}" in inn for p in PORTS)
 
     g = Graph()
     # 1. CamillaDSP -> USB, always (these links do not survive a CamillaDSP restart)
     if cam_out_up and usb_up:
         for i, p in enumerate(PORTS):
-            g.add(cam_out(i), f"{USB}:playback_{p}")
+            g.add(cam_out(i), f"{usb}:playback_{p}")
     dsp_ready = (cam_out_up and cam_in_up and usb_up
-                 and all(g.has(cam_out(i), f"{USB}:playback_{p}") for i, p in enumerate(PORTS)))
+                 and all(g.has(cam_out(i), f"{usb}:playback_{p}") for i, p in enumerate(PORTS)))
     parts = route_apps(g, apps, mode == "on" and dsp_ready and profile.startswith("stereo")) if apps else []
     if profile.startswith("stereo-ad") or any(p.startswith("theater-upmix") for p in out | inn):
         eng = route_engine(g, out, inn, [f"{n}" for n in apps] + (["mpv"] if {"FL", "FR"} <= set(mpv) else []),
@@ -146,12 +166,12 @@ def apply(mode, out=None, profile="film"):
             parts.append(eng)
     if not mpv:
         return "; ".join(parts) if parts else "idle"
-    return "; ".join([route_mpv(g, mpv, mode, dsp_ready, usb_up)] + parts)
+    return "; ".join([route_mpv(g, mpv, mode, dsp_ready, usb_up, usb)] + parts)
 
 
-def route_mpv(g, mpv, mode, dsp_ready, usb_up):
+def route_mpv(g, mpv, mode, dsp_ready, usb_up, usb):
     def direct(p):
-        return f"mpv:output_{p}", f"{USB}:playback_{p}"
+        return f"mpv:output_{p}", f"{usb}:playback_{p}"
 
     def via(p):
         return f"mpv:output_{p}", cam_in(PORTS.index(p))
@@ -586,6 +606,8 @@ def collect_status():
     if out is None or inn is None:
         d["pipewire"] = False
         return d
+    usb = resolve_usb(inn)
+    d["usb_node"] = usb if usb != USB else None   # set only when PipeWire registered the interface under a different name than configured
     g = Graph()
     up = all(p in inn for p in ENGINE_IN) and all(p in out for p in ENGINE_OUT)
     d["dsp"]["engine"] = {"state": engine_state(), "service": service_state(ENGINE_UNIT), "ports_up": up,
@@ -603,11 +625,11 @@ def collect_status():
     src = mpv_source()
     m["source"] = ({"codec": src["codec"], "profile": src["profile"], "channels": src["channels"], "kind": src["kind"], "why": src["why"]}
                    if src else None)
-    dd = sum(g.has(f"mpv:output_{p}", f"{USB}:playback_{p}") for p in mpv)
+    dd = sum(g.has(f"mpv:output_{p}", f"{usb}:playback_{p}") for p in mpv)
     v = sum(g.has(f"mpv:output_{p}", cam_in(PORTS.index(p))) for p in mpv)
-    o = sum(g.has(cam_out(i), f"{USB}:playback_{p}") for i, p in enumerate(PORTS))
+    o = sum(g.has(cam_out(i), f"{usb}:playback_{p}") for i, p in enumerate(PORTS))
     m["route"] = {"via": v, "direct": dd, "to_usb": o, "channels": len(mpv)}
-    d["usb_up"] = all(f"{USB}:playback_{p}" in inn for p in PORTS)
+    d["usb_up"] = all(f"{usb}:playback_{p}" in inn for p in PORTS)
     if not d["usb_up"]:
         m["verdict"] = "usb-missing"
     elif v == len(mpv) and dd == 0:
@@ -630,6 +652,10 @@ def render_status(d):
     if not d["pipewire"]:
         print("PipeWire:      not reachable")
         return
+    if d.get("usb_node"):
+        print(f"USB interface: found as \"{d['usb_node']}\", not the configured name (\"{USB}\"); using it anyway.")
+        print("               This usually means the interface reconnected without a USB serial number to")
+        print("               match against. Harmless on its own; if it keeps happening, see docs/layouts.md.")
     en = dsp["engine"]
     print(f"Adaptive engine: {en['state']}, service {en['service']}, ports {'up' if en['ports_up'] else 'down'}"
           + (", linked into CamillaDSP" if en["linked"] else ""))
@@ -649,8 +675,9 @@ def render_status(d):
     print(f"mpv:           {len(m['channels'])} channels ({' '.join(m['channels'])})")
     print(f"Route:         via CamillaDSP {r['via']}/{r['channels']}   direct {r['direct']}/{r['channels']}   CamillaDSP -> USB {r['to_usb']}/{N}")
     if m["verdict"] == "usb-missing":
-        print("=> USB interface not connected (or named differently, see THEATER_USB): nothing can be routed to the rig;")
-        print("   audio plays on the default output device")
+        print("=> USB interface not connected: nothing can be routed to the rig; audio plays on the default")
+        print("   output device. (Checked for the configured name and for a reconnected instance under a")
+        print("   different name; neither was found. Override with THEATER_USB if it is simply misconfigured.)")
     elif m["verdict"] == "cam":
         print("=> audio goes through CamillaDSP (EQ active)")
     elif m["verdict"] == "direct":

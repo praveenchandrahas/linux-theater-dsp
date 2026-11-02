@@ -16,23 +16,26 @@ T.service_state = lambda n: "active"
 SRC = {"codec": "truehd", "profile": "Dolby TrueHD + Dolby Atmos", "channels": 8, "kind": "film", "why": "Atmos: object rendering, no upmix"}
 
 
-def world(cam=True, usb=True, mpv=None, mpv_via=None, chrome=None, engine_up=False, engine_linked=False, pw=True):
+def world(cam=True, usb=True, usb_as=None, mpv=None, mpv_via=None, chrome=None, engine_up=False, engine_linked=False, pw=True):
+    """usb_as: register the interface's ports under this node name instead of U, to exercise resolve_usb's
+    fallback for a USB device with no serial number that reconnects under a renamed PipeWire node."""
     st = {"out": [], "in": [], "links": []}
+    u = usb_as or U
     if usb:
-        st["in"] += [f"{U}:playback_{p}" for p in P]
+        st["in"] += [f"{u}:playback_{p}" for p in P]
     if cam:
         for n in range(1, 9):
             st["out"].append(f"camilladsp-playback:output_{n}"); st["in"].append(f"camilladsp-capture:input_{n}")
             if usb:
-                st["links"].append([f"camilladsp-playback:output_{n}", f"{U}:playback_{P[n - 1]}"])
+                st["links"].append([f"camilladsp-playback:output_{n}", f"{u}:playback_{P[n - 1]}"])
     for p in (mpv or []):
         st["out"].append(f"mpv:output_{p}")
         if mpv_via == "cam":
             st["links"].append([f"mpv:output_{p}", f"camilladsp-capture:input_{P.index(p) + 1}"])
         elif mpv_via == "direct":
-            st["links"].append([f"mpv:output_{p}", f"{U}:playback_{p}"])
+            st["links"].append([f"mpv:output_{p}", f"{u}:playback_{p}"])
         elif mpv_via == "mixed":
-            st["links"].append([f"mpv:output_{p}", f"{U}:playback_{p}"])
+            st["links"].append([f"mpv:output_{p}", f"{u}:playback_{p}"])
             st["links"].append([f"mpv:output_{p}", f"camilladsp-capture:input_{P.index(p) + 1}"])
     if chrome:
         for i, p in enumerate(chrome[0]):
@@ -65,6 +68,9 @@ SCEN = {
     "mpv_mixed": (dict(mpv=P, mpv_via="mixed"), dict(), SRC),
     "usb_missing": (dict(mpv=["FL", "FR"], mpv_via="direct", usb=False), dict(), None),
     "no_cam_mpv": (dict(cam=False, mpv=P, mpv_via="direct"), dict(), SRC),
+    # the interface has no USB serial number and reconnected under a PipeWire-suffixed name; resolve_usb must
+    # find it anyway (same facts as atmos_via_cam, just under "<USB>.2" instead of the configured name)
+    "usb_renamed": (dict(mpv=P, mpv_via="cam", usb_as=f"{U}.2"), dict(), SRC),
 }
 
 
@@ -111,6 +117,10 @@ if hasattr(T, "collect_status"):
     d = js("usb_missing"); check("json: USB missing is a verdict", d["mpv"]["verdict"] == "usb-missing" and d["usb_up"] is False)
     d = js("mpv_mixed"); check("json: mixed routing is a verdict", d["mpv"]["verdict"] == "mixed")
     d = js("mpv_direct_unidentified"); check("json: unidentified source is null", d["mpv"]["source"] is None and d["mpv"]["verdict"] == "direct")
+    d = js("usb_renamed")
+    check("json: USB found under a renamed node is resolved, not usb-missing", d["usb_up"] is True and d["usb_node"] == f"{U}.2"
+          and d["mpv"]["verdict"] == "cam" and d["mpv"]["route"] == {"via": 8, "direct": 0, "to_usb": 8, "channels": 8}, str(d.get("mpv")))
+    d = js("atmos_via_cam"); check("json: usb_node is not set when the configured name matches exactly", d.get("usb_node") is None)
 
 print("\nALL PASS" if ok else "\nSOME FAILED")
 sys.exit(0 if ok else 1)

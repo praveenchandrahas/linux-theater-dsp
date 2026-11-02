@@ -1,0 +1,12 @@
+EQ switch:     ON   (file <STATE>/eq)
+Router daemon: active
+CamillaDSP:    active   [bass set drone2, bed alignment: yes, heights: bass to sub + tone-match]
+Profile:       film   (mode auto; flavours: stereo balanced, bed balanced)
+USB interface: found as "alsa_output.usb-0d8c_USB_Sound_Device-00.analog-surround-71.2", not the configured name ("alsa_output.usb-0d8c_USB_Sound_Device-00.analog-surround-71"); using it anyway.
+               This usually means the interface reconnected without a USB serial number to
+               match against. Harmless on its own; if it keeps happening, see docs/layouts.md.
+Adaptive engine: on, service active, ports down
+Source:        truehd Dolby TrueHD + Dolby Atmos 8ch -> film (Atmos: object rendering, no upmix)
+mpv:           8 channels (FL FR RL RR FC LFE SL SR)
+Route:         via CamillaDSP 8/8   direct 0/8   CamillaDSP -> USB 8/8
+=> audio goes through CamillaDSP (EQ active)
