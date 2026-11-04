@@ -4,6 +4,8 @@
 
 > **Part of the [Software Defined Home Theatre](https://github.com/praveenchandrahas/Software-Defined-Home-Theatre) project.** The main repository holds the documentation, build log, results and the installer checks; this is one of its parts. Sibling repositories: [mpv-object-audio](https://github.com/praveenchandrahas/mpv-object-audio) (player and Atmos wrapper) · [Roomtone](https://github.com/praveenchandrahas/Roomtone) (measurement, autocal, status page, mpv overlay) · [seekthumbs](https://github.com/praveenchandrahas/seekthumbs) (seek-bar thumbnails) · [mpv-shelf](https://github.com/praveenchandrahas/mpv-shelf) (film browser for mpv).
 
+Full docs: https://praveenchandrahas.github.io/linux-theater-dsp/
+
 **Stereo and 5.1 upmixer (to 5.1.2, with ceiling channels), PipeWire routing and a CamillaDSP room-correction profile generator** for a Linux software-defined home theatre. Written for one 5.1.2 rig (see "Adapting" below), but the upmixers (`scripts/upmix.py`, `scripts/upmix_engine.py`) are two small numpy-only files you can read and reuse on their own.
 
 - **`eq`** (the `theater-route` command) watches PipeWire and keeps the right audio paths linked into CamillaDSP, and switches the profile by what is playing
@@ -23,11 +25,7 @@ sudo apt install ./linux-theater-dsp_0.1.0_all.deb
 theater-setup --dry-run   # then: theater-setup install
 ```
 
-Needs PipeWire and Python 3; CamillaDSP itself is not packaged (the main repository's `install.sh` fetches the real release and checks its checksum).
-
-The package puts files under `/usr` only. Its install and remove scripts do not enable or start services, do not write into any home folder, and do not touch CamillaDSP or PipeWire configuration; the setup command above does the per-user part, and `--dry-run` shows what it would do first. Details, the other repositories' packages, and the one-command installer are in the main repository's [packaging notes](https://github.com/praveenchandrahas/Software-Defined-Home-Theatre/blob/main/docs/packaging.md).
-
-What was checked: written with an AI assistant; checked against simulated rooms and REW exports; used and checked by the author in his own room (one room, one author). No external or second-person validation yet. The packages are unsigned. CI installs and removes them in clean Ubuntu 24.04; the packaging itself has not been run on the author's own rig.
+Full install steps, what was checked, and running from a clone instead of the `.deb`: see [docs/install.md](https://praveenchandrahas.github.io/linux-theater-dsp/install/).
 
 ## How this differs from EasyEffects and other generic upmixers, and why this route
 
@@ -48,15 +46,7 @@ What was checked: written with an AI assistant; checked against simulated rooms 
 - It does not replace object audio. Real Atmos and DTS:X go through the Omniphony player (`mpv-object-audio`); this is for stereo and 5.1 sources.
 - If you have a plain 5.1 or 7.1 system, PipeWire's built-in upmix or a hardware decoder is simpler and probably enough.
 
-| Path | What it is |
-|---|---|
-| `scripts/theater-route`, `set-eq.py`, `upmix.py`, `upmix_engine.py` | the router / `eq` command, the config generator, the upmixers |
-| `scripts/install-autoroute.sh` | installs the above and the systemd units into `~/.local/bin` and `~/.config/systemd/user` (safe to re-run; this is also how you update) |
-| `scripts/make-default.sh` | writes and loads the standing profile, installs the router, enables the services |
-| `scripts/route-mpv.sh` | manual helper that links an mpv instance by hand |
-| `configs/` | an example generated CamillaDSP config and the systemd unit files |
-| `tools/upmixtest/` | offline checks that run the real CamillaDSP over synthetic noise (levels, correlations, decorrelator quality); see its README |
-| `tests/` | router tests against a simulated PipeWire graph (`tests/fake-pw-link`), config-generation tests and engine tests; no hardware needed |
+Repository layout (what each script and folder is): [docs/install.md](https://praveenchandrahas.github.io/linux-theater-dsp/install/#repository-layout).
 
 ## Use
 
@@ -68,23 +58,11 @@ tests/run.sh                    # 149 checks, no hardware
 ./scripts/make-default.sh       # writes and loads the standing profile, installs the router and `eq`, enables the services
 ```
 
+The `eq` commands for day-to-day use (profiles, flavours, the adaptive engine, status) are documented in [docs/usage.md](https://praveenchandrahas.github.io/linux-theater-dsp/usage/).
+
 ## Adapting it to your system
 
-Paths, user names, the PipeWire/ALSA names of the author's 7.1 USB interface (a Vantec), and every delay, trim and EQ value in `scripts/set-eq.py` are **from the author's machine and room**. Change them for yours:
-the interface name in `set-eq.py` and the units, and the `ALIGN` / EQ tables after you have measured your own room.
-
-The room numbers (per-speaker delay and trim, the height-speaker tone match and trim, the bass set) can be kept in one JSON file, `room.json`, instead of editing the tables:
-
-```
-./scripts/set-eq.py --dump-room > room.json                     # the built-in room (the author's) as a template
-$EDITOR room.json                                               # change delays, trims, height tone, bass.base_set, bass.extra_filters
-./scripts/set-eq.py --room=room.json --write-config=/tmp/proposed.yml   # build and check a config; nothing else is touched
-./scripts/set-eq.py --room=room.json                            # build it and load it (the normal flow, with your numbers)
-```
-
-**Profile switches are gapless by default.** After writing the new config, `set-eq.py` sends CamillaDSP a SIGHUP so it re-reads it in place (no websocket, no change to the unit file). It then checks that the same process is still running with all 16 ports and exactly the same links; if anything differs it falls back to a full restart plus relinking, as before. `SETEQ_RELOAD=restart` forces the restart; `SETEQ_RELOAD_WAIT` (default 1.5 s) is how long it waits before checking.
-
-`room.json` is plain JSON, strictly validated (channel names `FL FR FC LFE SL SR RL RR`; delay 0-20 ms, trim -20 to +6 dB, filter freq 20-20000 Hz, gain -24 to +6 dB, Q 0.3-12; unknown keys are rejected) and never executed. Keys you leave out keep the built-in values; a bad file exits with code 2 and changes nothing. `--write-config=PATH` validates with `camilladsp -c` when the binary exists, writes PATH and does nothing else (no copy to `~/.config`, no restart, no relinking). `tests/golden/` holds configs generated before this feature existed; `tests/run.sh` checks the default profile is still byte-identical.
+Paths, user names, the PipeWire/ALSA names of the author's 7.1 USB interface (a Vantec), every delay/trim/EQ value in `scripts/set-eq.py`, and the speaker layout are **from the author's own machine and room**. Changing them for yours — the `room.json` room-correction file and the speaker-layout file — is covered in [docs/configuration.md](https://praveenchandrahas.github.io/linux-theater-dsp/configuration/).
 
 ## Licence
 
@@ -94,22 +72,9 @@ Part of the [software-defined home theatre](https://github.com/praveenchandrahas
 
 ## Your layout
 
-The router, `set-eq.py` and the upmixers read one layout file (`~/.config/roomtone/layout.yml`, or `$ROOMTONE_LAYOUT`): which speakers exist, which interface port each is on, the sink name, and whether your amplifier does its own bass management. With no file the built-in layout is the author's 5.1.2, and the generated CamillaDSP configs, router links and upmix filters are byte-identical to before (golden tests in `tests/golden/layout/`).
-
-```
-scripts/layout.py --detect                          # what PipeWire shows, and the preset it would propose (plays nothing)
-scripts/layout.py --detect --device <sink> --write  # write that proposal
-scripts/layout.py --init 7.1                        # or a plain preset: 2.0 2.1 5.1 5.1.2 7.1 7.1.2 7.1.4
-scripts/layout.py --validate                        # say what is wrong with the file
-scripts/set-eq.py --layout=FILE --write-config=/tmp/x.yml   # build a config for any layout without touching anything
-```
-
-`install-autoroute.sh` installs the module and a `roomtone-layout` command. The stereo and 5.1 upmixes are offered only for layouts with FL FR FC LFE SL SR plus exactly two height speakers (5.1.2, 7.1.2); otherwise `eq` says why. Every preset except 5.1.2 starts with neutral room numbers (zero delays and trims, no tone filters, flat bass set) until you measure. The Roomtone repository has the Layout page (identify each speaker with a quiet tone, preview, save with backup) and the full reference: [docs/layouts.md](https://github.com/praveenchandrahas/Roomtone/blob/main/docs/layouts.md).
-
-**Tested how:** written with an AI assistant; checked against simulated rooms and REW exports; used and checked by the author in his own room (one room, one author). No external or second-person validation yet. Only the author's 5.1.2 has run on real hardware. Other layouts are tested by generating configs and router link sets and checking them (and `camilladsp -c` where it exists), not by listening.
+The router, `set-eq.py` and the upmixers read one layout file (`~/.config/roomtone/layout.yml`, or `$ROOMTONE_LAYOUT`) describing your speakers and interface; with no file the built-in layout is the author's 5.1.2. `scripts/layout.py --detect`, `--init`, and `--validate` help you build one. Full details: [docs/configuration.md](https://praveenchandrahas.github.io/linux-theater-dsp/configuration/).
 
 ## Status and control page
 
-`eq status --json` prints everything `eq status` knows as one JSON object (schema 1: `eq`, `dsp`, `apps`, `mpv`, `usb_up`); the text output is unchanged
-(`tests/test_status.py` holds golden copies for nine situations). The local page (`theater-ctld`) and the mpv overlay that read it and drive `eq` now live in
-[Roomtone](https://github.com/praveenchandrahas/Roomtone) (`gui/`, `overlay/`); install them from there (run `./scripts/install-autoroute.sh` here first, so `eq status --json` exists).
+`eq status --json` prints everything `eq status` knows as one JSON object, for scripts and the status page. The local page (`theater-ctld`) and the mpv overlay that read it and drive `eq` now live in
+[Roomtone](https://github.com/praveenchandrahas/Roomtone) (`gui/`, `overlay/`); install them from there (run `./scripts/install-autoroute.sh` here first, so `eq status --json` exists). See [docs/usage.md](https://praveenchandrahas.github.io/linux-theater-dsp/usage/) for the rest of the `eq` commands.
